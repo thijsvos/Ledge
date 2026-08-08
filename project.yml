@@ -1,0 +1,55 @@
+name: Ledge
+options:
+  bundleIdPrefix: app.ledge
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+
+packages:
+  LedgeCore:
+    path: Sources/LedgeCore
+  KeyboardShortcuts:
+    url: https://github.com/sindresorhus/KeyboardShortcuts
+    from: 2.0.0
+
+targets:
+  Ledge:
+    type: application
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - App
+      - UI
+    dependencies:
+      - package: LedgeCore
+        product: LedgeCore
+      - package: KeyboardShortcuts
+        product: KeyboardShortcuts
+    info:
+      path: App/Info.plist
+      properties:
+        LSUIElement: true
+        CFBundleDisplayName: Ledge
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        NSPrincipalClass: NSApplication
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.ledge.Ledge
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
+        SWIFT_VERSION: "6.0"
+      configs:
+        Debug:
+          CODE_SIGN_IDENTITY: "-"
+
+schemes:
+  Ledge:
+    build:
+      targets:
+        Ledge: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - package: LedgeCore/LedgeCoreTests
