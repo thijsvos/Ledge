@@ -24,4 +24,19 @@ enum Fixtures {
     static var fakeClaude: URL {
         fixturesDir.appendingPathComponent("fake-claude.sh")
     }
+
+    /// Copies the committed fixture vault into a fresh temp directory. Tests
+    /// mutate the copy freely; the committed fixtures are NEVER touched.
+    /// Callers remove the returned directory in tearDown.
+    static func makeTempVaultCopy() throws -> URL {
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ledge-vault-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.copyItem(at: vault, to: destination)
+        return destination
+    }
+}
+
+/// Parses a strict ISO-8601 instant ("2026-08-07T23:59:59Z"). Test-only.
+func utcDate(_ iso8601: String) -> Date {
+    ISO8601DateFormatter().date(from: iso8601)!
 }

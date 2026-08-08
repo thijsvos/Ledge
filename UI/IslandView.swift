@@ -40,29 +40,37 @@ struct IslandView: View {
     var layout: IslandLayout
     var onHoverChanged: (Bool) -> Void
     var onIslandTap: () -> Void
+    /// Enter in the capture field: raw input for CaptureCoordinator. Defaulted
+    /// so `IslandView(state:)` stays constructible with no coordinator
+    /// (--render-preview uses a static stand-in anyway).
+    var onSubmit: (String) -> Void
+    /// Non-nil when the capture field should refill with preserved input (a
+    /// failed capture's text — see CaptureCoordinator). Defaulted so
+    /// `IslandView(state:)` stays constructible with no coordinator.
+    var captureRestoreInput: () -> String?
     /// ImageRenderer cannot rasterize AppKit-backed controls (TextField);
     /// --render-preview sets this to draw a static stand-in instead.
     var staticRendering: Bool
 
-    @State private var captureText = ""
     @State private var statusDotDimmed = false
-    @FocusState private var captureFieldFocused: Bool
 
     init(
         state: IslandState,
         layout: IslandLayout = .default,
         onHoverChanged: @escaping (Bool) -> Void = { _ in },
         onIslandTap: @escaping () -> Void = {},
+        onSubmit: @escaping (String) -> Void = { _ in },
+        captureRestoreInput: @escaping () -> String? = { nil },
         staticRendering: Bool = false
     ) {
         self.state = state
         self.layout = layout
         self.onHoverChanged = onHoverChanged
         self.onIslandTap = onIslandTap
+        self.onSubmit = onSubmit
+        self.captureRestoreInput = captureRestoreInput
         self.staticRendering = staticRendering
     }
-
-    private static let capturePlaceholder = "Capture a thought — start with / for an agent run"
 
     /// The black shape's size for a state. Static so the window controller can
     /// hit-test click-outside against the same numbers.
@@ -111,14 +119,6 @@ struct IslandView: View {
                 height: layout.windowSize.height,
                 alignment: .top
             )
-            .onChange(of: state) { _, newState in
-                captureFieldFocused = newState == .open
-            }
-            .onAppear {
-                if state == .open {
-                    captureFieldFocused = true
-                }
-            }
     }
 
     @ViewBuilder
@@ -134,30 +134,13 @@ struct IslandView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                 .padding(.bottom, 3)
         case .open:
-            // Capture field placeholder — Phase 2 wires InstantCapture and
-            // AgentRun onto onSubmit; for now Enter does nothing.
-            VStack(spacing: 0) {
-                Spacer(minLength: layout.islandSize.height + 8) // clear of the physical notch
-                if staticRendering {
-                    // ImageRenderer cannot rasterize the AppKit-backed
-                    // TextField; draw an equivalent static stand-in.
-                    Text(Self.capturePlaceholder)
-                        .font(.system(size: 15))
-                        .foregroundStyle(.white.opacity(0.5))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 24)
-                } else {
-                    TextField(Self.capturePlaceholder, text: $captureText)
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 15))
-                        .foregroundStyle(.white)
-                        .tint(.white)
-                        .focused($captureFieldFocused)
-                        .onSubmit {} // Phase 2
-                        .padding(.horizontal, 24)
-                }
-                Spacer()
-            }
+            // The §5 capture UI: field + "/" hint + live target chip.
+            CaptureView(
+                topClearance: layout.islandSize.height + 8, // clear of the physical notch
+                staticRendering: staticRendering,
+                onSubmit: onSubmit,
+                restoreInput: captureRestoreInput
+            )
         case .running:
             // Animated status dot at the notch edge (only animates while a
             // run is live — nothing animates when idle).

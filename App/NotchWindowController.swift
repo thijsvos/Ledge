@@ -9,13 +9,17 @@ struct NotchRootView: View {
     var layout: IslandLayout
     var onHoverChanged: (Bool) -> Void
     var onTap: () -> Void
+    var onSubmit: (String) -> Void
+    var captureRestoreInput: () -> String?
 
     var body: some View {
         IslandView(
             state: island.state,
             layout: layout,
             onHoverChanged: onHoverChanged,
-            onIslandTap: onTap
+            onIslandTap: onTap,
+            onSubmit: onSubmit,
+            captureRestoreInput: captureRestoreInput
         )
     }
 }
@@ -24,8 +28,9 @@ struct NotchRootView: View {
 /// All island mutations still flow through `IslandController.transition(to:)`.
 @MainActor
 final class NotchWindowController: NSObject {
-    let island = IslandController()
+    let island: IslandController
 
+    private let captureCoordinator: CaptureCoordinator
     private let window: NotchWindow
     private let hostingView: NSHostingView<NotchRootView>
     private var geometry: IslandGeometry
@@ -37,13 +42,23 @@ final class NotchWindowController: NSObject {
     private var localKeyMonitor: Any?
 
     override init() {
+        let island = IslandController()
+        self.island = island
+        captureCoordinator = CaptureCoordinator(island: island)
         let snapshot = Self.currentScreenSnapshot()
         let geometry = NotchGeometry.geometry(for: snapshot)
         self.geometry = geometry
         layout = IslandLayout(geometry: geometry)
         window = NotchWindow(contentRect: geometry.windowFrame)
         hostingView = NSHostingView(
-            rootView: NotchRootView(island: island, layout: layout, onHoverChanged: { _ in }, onTap: {})
+            rootView: NotchRootView(
+                island: island,
+                layout: layout,
+                onHoverChanged: { _ in },
+                onTap: {},
+                onSubmit: { _ in },
+                captureRestoreInput: { nil }
+            )
         )
         super.init()
 
@@ -135,7 +150,9 @@ final class NotchWindowController: NSObject {
             island: island,
             layout: layout,
             onHoverChanged: { [weak self] hovering in self?.hoverChanged(hovering) },
-            onTap: { [weak self] in self?.islandTapped() }
+            onTap: { [weak self] in self?.islandTapped() },
+            onSubmit: { [weak self] input in self?.captureCoordinator.submit(input) },
+            captureRestoreInput: { [weak self] in self?.captureCoordinator.consumeRestoreInput() }
         )
     }
 
