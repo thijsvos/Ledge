@@ -18,6 +18,14 @@ public final class ClaudeBinaryResolver: @unchecked Sendable {
     /// real home). Note: probing ~/.claude/local/claude looks for the BINARY
     /// the official installer places there — nothing auth-related is ever
     /// touched (§2.1).
+    ///
+    /// Documented deviation from §6 step 2: the spec's fifth location, "npm
+    /// global bin", is deliberately NOT probed directly. The default npm
+    /// prefixes are already covered by the first two paths (/opt/homebrew and
+    /// /usr/local), and locating a CUSTOM npm prefix would itself require
+    /// spawning npm or a shell — so that case is delegated to the step-3
+    /// login-shell fallback, which resolves any PATH-reachable install (npm
+    /// included) at the same one-spawn cost, cached for the launch.
     static let probePaths = [
         "/opt/homebrew/bin/claude",
         "/usr/local/bin/claude",

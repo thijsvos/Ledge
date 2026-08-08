@@ -215,13 +215,19 @@ public actor ClaudeRunner {
     /// runner in the SAME vault, and §2.4 (one live run per vault) forbids the
     /// old child overlapping the new one. Terminal — later enqueues are
     /// rejected with `.shuttingDown`.
-    public func terminateAll() async {
+    ///
+    /// Returns the prompts of the queued runs it dropped (FIFO order). The
+    /// user saw those acknowledged with a "Queued #n" peek, so the caller
+    /// must preserve or report them — typed text is never lost silently.
+    @discardableResult
+    public func terminateAll() async -> [String] {
         childState.withLock { $0.isShuttingDown = true }
+        let droppedPrompts = pending.map(\.handle.prompt)
         if !pending.isEmpty {
             pending.removeAll()
             emit(.queueChanged(depth: 0))
         }
-        guard let process = liveProcess, process.isRunning else { return }
+        guard let process = liveProcess, process.isRunning else { return droppedPrompts }
         logger.info("terminateAll: SIGTERM live child")
         process.terminate()
         await waitForExit(of: process, upTo: configuration.killGracePeriod)
@@ -230,6 +236,7 @@ public actor ClaudeRunner {
             kill(process.processIdentifier, SIGKILL)
             await waitForExit(of: process, upTo: 2)
         }
+        return droppedPrompts
     }
 
     /// Synchronous, nonisolated quit primitive: marks the runner as shutting
@@ -278,6 +285,16 @@ public actor ClaudeRunner {
     /// Test hook: is the most recently spawned child still alive?
     func lastChildIsRunningForTesting() -> Bool {
         lastSpawnedProcess?.isRunning ?? false
+    }
+
+    /// Test seam for the quit-vs-spawn race: runs after `process.run()` but
+    /// BEFORE the pid is published to `childState`, so a test can interleave
+    /// `terminateNow()` in exactly the window a quitting main thread could.
+    /// Never set in production.
+    private var spawnRaceWindowHookForTesting: (@Sendable () -> Void)?
+
+    func setSpawnRaceWindowHookForTesting(_ hook: (@Sendable () -> Void)?) {
+        spawnRaceWindowHookForTesting = hook
     }
 
     // MARK: - Worker loop (serialized FIFO)
@@ -386,11 +403,25 @@ public actor ClaudeRunner {
         }
         liveProcess = process
         lastSpawnedProcess = process
-        // No suspension point since the isShuttingDown check above, so a
-        // terminate cannot have slipped in between; from here on terminateNow
-        // sees the pid. (A terminateAll interleaving at a later await finds
-        // `liveProcess` set and SIGTERMs it directly.)
-        childState.withLock { $0.livePID = process.processIdentifier }
+        spawnRaceWindowHookForTesting?()
+        // Publish the pid and RE-READ the shutdown flag in one lock section.
+        // `terminateNow()` is nonisolated and runs on its caller's thread (the
+        // main thread, at quit) in true parallel with this actor — it needs no
+        // suspension point to interleave with the synchronous stretch between
+        // the isShuttingDown check above and this publication. Either it sees
+        // the pid published here (and signals it), or it set isShuttingDown
+        // first and WE signal the just-spawned child now: both ways the child
+        // cannot escape unsignaled at app quit (§6). (A terminateAll
+        // interleaving at a later await finds `liveProcess` set and SIGTERMs
+        // it directly.)
+        let terminatedDuringSpawn = childState.withLock { state in
+            state.livePID = process.processIdentifier
+            return state.isShuttingDown
+        }
+        if terminatedDuringSpawn {
+            logger.error("terminate raced the spawn — SIGTERM just-spawned child")
+            process.terminate()
+        }
         logger.info("spawned claude pid \(process.processIdentifier)")
 
         // Drain both pipes (actor-isolated tasks; the readability handlers

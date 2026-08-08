@@ -376,6 +376,47 @@ final class ClaudeRunnerTests: XCTestCase {
         }
     }
 
+    /// Quit-vs-spawn race (flow G): `terminateNow()` interleaving between
+    /// execute()'s pre-spawn shutdown check and its pid publication — possible
+    /// because terminateNow is nonisolated and runs on the quitting main
+    /// thread in true parallel with the actor — must still kill the
+    /// just-spawned child. The publication re-reads the shutdown flag inside
+    /// the same lock section and signals the child itself when a terminate
+    /// slipped in. The test hook makes the ~1 ms window deterministic.
+    func testTerminateNowInSpawnRaceWindowStillKillsChild() async throws {
+        let runner = try makeRunner(mode: "slow", sleepSeconds: "30")
+        await runner.setSpawnRaceWindowHookForTesting { [weak runner] in
+            runner?.terminateNow()
+        }
+        _ = await runner.enqueue(prompt: "race")
+        let completion = try await firstCompletion(from: runner.events, timeout: 8)
+        guard case .failure = completion.outcome else {
+            return XCTFail("raced run must complete as failure, got \(completion.outcome)")
+        }
+        let dead = await waitForChildDeath(of: runner)
+        XCTAssertTrue(dead, "a child spawned inside the race window must still be killed")
+        guard case .rejected(reason: .shuttingDown) = await runner.enqueue(prompt: "after") else {
+            return XCTFail("enqueue after the raced terminate must be rejected")
+        }
+    }
+
+    /// terminateAll returns the queued prompts it dropped (FIFO order) so the
+    /// App layer can preserve/report them — prompts the user saw acknowledged
+    /// with a "Queued #n" peek must never vanish silently on a vault/binary
+    /// change.
+    func testTerminateAllReturnsDroppedQueuedPrompts() async throws {
+        let runner = try makeRunner(mode: "slow", sleepSeconds: "2")
+        guard case .started = await runner.enqueue(prompt: "live") else {
+            return XCTFail("must start")
+        }
+        _ = await runner.enqueue(prompt: "queued-1")
+        _ = await runner.enqueue(prompt: "queued-2")
+        let dropped = await runner.terminateAll()
+        XCTAssertEqual(dropped, ["queued-1", "queued-2"], "dropped prompts, FIFO order")
+        let droppedAgain = await runner.terminateAll()
+        XCTAssertEqual(droppedAgain, [], "second terminateAll has nothing left to drop")
+    }
+
     // MARK: - Pre-flight rejections
 
     func testMissingBinaryIsRejected() async throws {

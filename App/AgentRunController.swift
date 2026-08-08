@@ -43,6 +43,17 @@ final class AgentRunController: AgentRunSubmitting {
     /// Every enqueue on the replacement awaits this first — §2.4: one live
     /// run per vault, so the old and new child must never overlap.
     private var retirementDrain: Task<Void, Never>?
+    /// Retired runners whose drain has not finished — their child may still be
+    /// alive. `shutdown()` must SIGTERM these too: the detached drain task
+    /// that owns their SIGTERM→SIGKILL escalation dies with the process, so
+    /// without this a retired runner's child could silently survive quit (§6).
+    private var retiredRunners: [ClaudeRunner] = []
+    /// Serializes submissions: each Enter's async pipeline (binary resolve →
+    /// retirement-drain wait → enqueue) chains onto the previous one, so
+    /// runner enqueue order always equals Enter order. Two submissions parked
+    /// on the same retirement drain would otherwise resume in unspecified
+    /// order and could enqueue inverted (flow D FIFO).
+    private var submissionChain: Task<Void, Never>?
     /// Mirrors the runner's pending-queue depth (from queueChanged events) so
     /// completion handling knows whether another run follows immediately.
     private var queueDepth = 0
@@ -132,7 +143,11 @@ final class AgentRunController: AgentRunSubmitting {
         island.transition(to: .running(liveHandle ?? RunHandle(prompt: prompt)))
 
         let resolver = currentResolver()
-        Task { [weak self] in
+        let previousSubmission = submissionChain
+        submissionChain = Task { [weak self] in
+            // FIFO discipline: this Enter's pipeline starts only after the
+            // previous Enter's pipeline reached its enqueue (or bailed).
+            await previousSubmission?.value
             // Off the main actor: the login-shell fallback can take seconds.
             let binaryPath = await Task.detached { resolver.resolve() }.value
             guard let self else { return }
@@ -189,10 +204,19 @@ final class AgentRunController: AgentRunSubmitting {
     /// semaphore and no dependence on executor scheduling during termination.
     /// It also marks the runner as shutting down, so nothing new can spawn in
     /// the window before process exit.
+    ///
+    /// Retired runners are signaled too: their SIGTERM→SIGKILL escalation
+    /// lives in a detached drain task that dies with the process, so a
+    /// vault/binary change followed by a quick quit would otherwise leave the
+    /// old child alive and editing the old vault. `terminateNow()` is
+    /// idempotent — overlapping an in-flight `terminateAll()` is harmless.
     func shutdown() {
         eventsTask?.cancel()
         eventsTask = nil
         runner?.terminateNow()
+        for retired in retiredRunners {
+            retired.terminateNow()
+        }
     }
 
     // MARK: - Runner lifetime & events
@@ -211,10 +235,14 @@ final class AgentRunController: AgentRunSubmitting {
             island.clearLiveRun()
             liveHandle = nil
             queueDepth = 0
+            retiredRunners.append(previous)
             let previousDrain = retirementDrain
-            retirementDrain = Task.detached {
+            retirementDrain = Task.detached { [weak self] in
                 await previousDrain?.value
-                await previous.terminateAll() // waits until the child is dead
+                // Waits until the child is dead; returns the queued prompts
+                // it dropped so they are not lost silently.
+                let dropped = await previous.terminateAll()
+                await self?.finishRetirement(of: previous, droppedPrompts: dropped)
             }
         }
         let created = ClaudeRunner(configuration: ClaudeRunner.Configuration(
@@ -238,6 +266,24 @@ final class AgentRunController: AgentRunSubmitting {
             }
         }
         return created
+    }
+
+    /// Retirement epilogue (main actor, called from the drain task): forget
+    /// the dead runner and surface the queued prompts its `terminateAll`
+    /// dropped. The user saw those acknowledged with a "Queued #n" peek, so
+    /// they must not vanish silently — each is handed back through
+    /// `onSubmissionRejected` (the single-slot restore keeps the LAST one in
+    /// the field) and one info peek reports the drop.
+    private func finishRetirement(of retired: ClaudeRunner, droppedPrompts: [String]) {
+        retiredRunners.removeAll { $0 === retired }
+        guard !droppedPrompts.isEmpty else { return }
+        for prompt in droppedPrompts {
+            onSubmissionRejected?(prompt)
+        }
+        let count = droppedPrompts.count
+        showPeek(.info(message: count == 1
+                ? "1 queued prompt dropped — vault or binary changed"
+                : "\(count) queued prompts dropped — vault or binary changed"))
     }
 
     private func handle(enqueued: Enqueued, prompt: String) {
