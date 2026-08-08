@@ -13,6 +13,9 @@ struct PeekView: View {
     var content: PeekContent
     var onOpenInTerminal: (ResumeAction) -> Void = { _ in }
     var onCopyCommand: (ResumeAction) -> Void = { _ in }
+    /// §7: configuration failures (no vault / bad vault / no binary) offer
+    /// "Open Settings…" instead of the terminal escape hatch.
+    var onOpenSettings: () -> Void = {}
 
     var body: some View {
         VStack(spacing: 7) {
@@ -22,7 +25,7 @@ struct PeekView: View {
                     Image(systemName: "checkmark")
                         .foregroundStyle(.green)
                     Text("\(filesEdited) file\(filesEdited == 1 ? "" : "s") · \(Int(duration.rounded()))s")
-                case let .failure(message, _):
+                case let .failure(message, _, _):
                     Image(systemName: "xmark")
                         .foregroundStyle(.red)
                     // §6: failures show the stderr tail — up to 3 lines after
@@ -41,10 +44,14 @@ struct PeekView: View {
             }
             .font(.system(size: 12, weight: .medium))
 
-            if case let .failure(_, resume) = content, let resume {
-                HStack(spacing: 8) {
-                    peekButton("Open in Terminal") { onOpenInTerminal(resume) }
-                    peekButton("Copy command") { onCopyCommand(resume) }
+            if case let .failure(_, resume, configuration) = content {
+                if let resume {
+                    HStack(spacing: 8) {
+                        peekButton("Open in Terminal") { onOpenInTerminal(resume) }
+                        peekButton("Copy command") { onCopyCommand(resume) }
+                    }
+                } else if configuration {
+                    peekButton("Open Settings…") { onOpenSettings() }
                 }
             }
         }

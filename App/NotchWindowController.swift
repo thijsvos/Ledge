@@ -1,4 +1,5 @@
 import AppKit
+import KeyboardShortcuts
 import LedgeCore
 import SwiftUI
 
@@ -7,23 +8,27 @@ import SwiftUI
 struct NotchRootView: View {
     var island: IslandController
     var layout: IslandLayout
+    var reduceMotion: Bool
     var onHoverChanged: (Bool) -> Void
     var onTap: () -> Void
     var onSubmit: (String) -> Void
     var captureRestoreInput: () -> String?
     var onOpenInTerminal: (ResumeAction) -> Void
     var onCopyCommand: (ResumeAction) -> Void
+    var onOpenSettings: () -> Void
 
     var body: some View {
         IslandView(
             state: island.state,
             layout: layout,
+            reduceMotion: reduceMotion,
             onHoverChanged: onHoverChanged,
             onIslandTap: onTap,
             onSubmit: onSubmit,
             captureRestoreInput: captureRestoreInput,
             onOpenInTerminal: onOpenInTerminal,
-            onCopyCommand: onCopyCommand
+            onCopyCommand: onCopyCommand,
+            onOpenSettings: onOpenSettings
         )
     }
 }
@@ -34,12 +39,20 @@ struct NotchRootView: View {
 final class NotchWindowController: NSObject {
     let island: IslandController
 
+    /// Opens the Settings window; wired by AppDelegate. Fired by tapping a
+    /// configuration-failure peek (or its "Open Settings…" button) — §7
+    /// empty/error-states pass.
+    var onOpenSettings: (() -> Void)?
+
     private let agentRunController: AgentRunController
     private let captureCoordinator: CaptureCoordinator
     private let window: NotchWindow
     private let hostingView: NSHostingView<NotchRootView>
     private var geometry: IslandGeometry
     private var layout: IslandLayout
+    /// §7 reduced motion: tracked from NSWorkspace and plumbed into
+    /// IslandView, where IslandMotion swaps the spring for a ~150 ms fade.
+    private var reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
 
     private var hoverTask: Task<Void, Never>?
     private var localMouseMonitor: Any?
@@ -63,12 +76,14 @@ final class NotchWindowController: NSObject {
             rootView: NotchRootView(
                 island: island,
                 layout: layout,
+                reduceMotion: false,
                 onHoverChanged: { _ in },
                 onTap: {},
                 onSubmit: { _ in },
                 captureRestoreInput: { nil },
                 onOpenInTerminal: { _ in },
-                onCopyCommand: { _ in }
+                onCopyCommand: { _ in },
+                onOpenSettings: {}
             )
         )
         super.init()
@@ -88,6 +103,7 @@ final class NotchWindowController: NSObject {
 
         installMonitors()
         installObservers()
+        installHotkey()
         observeIslandState()
         applyWindowSideEffects()
     }
@@ -135,7 +151,8 @@ final class NotchWindowController: NSObject {
         )
     }
 
-    /// Recompute on screen-parameter changes and wake (§4).
+    /// Recompute on screen-parameter changes and wake (§4); track the
+    /// system's reduce-motion setting (§7).
     private func installObservers() {
         NotificationCenter.default.addObserver(
             self,
@@ -149,10 +166,23 @@ final class NotchWindowController: NSObject {
             name: NSWorkspace.didWakeNotification,
             object: nil
         )
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(accessibilityDisplayOptionsDidChange),
+            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil
+        )
     }
 
     @objc private func environmentDidChange(_: Notification) {
         recomputeGeometry()
+    }
+
+    @objc private func accessibilityDisplayOptionsDidChange(_: Notification) {
+        let updated = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        guard updated != reduceMotion else { return }
+        reduceMotion = updated
+        installRootView()
     }
 
     private func recomputeGeometry() {
@@ -170,12 +200,14 @@ final class NotchWindowController: NSObject {
         hostingView.rootView = NotchRootView(
             island: island,
             layout: layout,
+            reduceMotion: reduceMotion,
             onHoverChanged: { [weak self] hovering in self?.hoverChanged(hovering) },
             onTap: { [weak self] in self?.islandTapped() },
             onSubmit: { [weak self] input in self?.captureCoordinator.submit(input) },
             captureRestoreInput: { [weak self] in self?.captureCoordinator.consumeRestoreInput() },
             onOpenInTerminal: { [weak self] resume in self?.agentRunController.openInTerminal(resume) },
-            onCopyCommand: { [weak self] resume in self?.agentRunController.copyCommand(resume) }
+            onCopyCommand: { [weak self] resume in self?.agentRunController.copyCommand(resume) },
+            onOpenSettings: { [weak self] in self?.openSettingsFromPeek() }
         )
     }
 
@@ -199,11 +231,47 @@ final class NotchWindowController: NSObject {
         }
     }
 
-    /// Click on the island opens the capture field (hotkey arrives Phase 4).
+    /// Click on the island. A configuration-failure peek (no resume, cause is
+    /// setup) routes the tap to Settings (§7 empty/error-states pass); any
+    /// other state opens the capture field.
     private func islandTapped() {
         hoverTask?.cancel()
         hoverTask = nil
+        if case let .peek(.failure(_, resume, configuration)) = island.state,
+           resume == nil, configuration
+        {
+            openSettingsFromPeek()
+            return
+        }
         island.transition(to: .open)
+    }
+
+    /// §7 global hotkey (default ⌥Space, recorded in Settings): toggle — if
+    /// the island is `.open`, dismiss (the exact Esc path); otherwise open,
+    /// which makes the panel key. Works from any app; the KeyboardShortcuts
+    /// handler captures `self` weakly so the listener can never retain-cycle
+    /// (or revive) the controller.
+    func toggleCapture() {
+        hoverTask?.cancel()
+        hoverTask = nil
+        if island.state == .open {
+            dismissToIdle()
+        } else {
+            island.transition(to: .open)
+        }
+    }
+
+    private func installHotkey() {
+        KeyboardShortcuts.onKeyUp(for: .toggleCapture) { [weak self] in
+            self?.toggleCapture()
+        }
+    }
+
+    /// Configuration-failure peeks guide the user to Settings; the peek is
+    /// dismissed so it doesn't linger behind the Settings window.
+    private func openSettingsFromPeek() {
+        dismissToIdle()
+        onOpenSettings?()
     }
 
     /// Dismissing the open island returns it to idle, which is NOT always

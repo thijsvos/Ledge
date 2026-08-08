@@ -2,10 +2,25 @@ import LedgeCore
 import SwiftUI
 
 /// Shared motion constants (§4): exactly one spring everywhere, 80 ms hover
-/// debounce.
+/// debounce. Reduced motion (§7) is implemented HERE and only here — no view
+/// hand-rolls its own fallback.
 enum IslandMotion {
     static let spring = Animation.spring(response: 0.32, dampingFraction: 0.78)
     static let hoverDebounce = Duration.milliseconds(80)
+    /// ~150 ms cross-fade used for every state change when the system's
+    /// reduce-motion accessibility setting is on — no spring overshoot.
+    static let reducedMotionFade = Animation.easeInOut(duration: 0.15)
+    /// Status-dot pulse while a run is live (§4 `.running`). Lives here with
+    /// every other animation; IslandView drives it reactively so a LIVE
+    /// Reduce Motion change stops or starts the pulse immediately.
+    static let statusDotPulse = Animation.easeInOut(duration: 0.8).repeatForever(autoreverses: true)
+
+    /// The one animation every island state change uses. `reduceMotion` comes
+    /// from NSWorkspace (observed by the App layer) — behavior with
+    /// `reduceMotion == false` is EXACTLY the Phase-1 spring.
+    static func animation(reduceMotion: Bool) -> Animation {
+        reduceMotion ? reducedMotionFade : spring
+    }
 }
 
 /// The sizes the island view lays out against, derived from `IslandGeometry`.
@@ -52,6 +67,12 @@ struct IslandView: View {
     /// pasteboard). Defaulted so `IslandView(state:)` stays constructible.
     var onOpenInTerminal: (ResumeAction) -> Void
     var onCopyCommand: (ResumeAction) -> Void
+    /// §7: configuration-failure peeks offer "Open Settings…".
+    var onOpenSettings: () -> Void
+    /// §7 reduced motion (from NSWorkspace, observed by the App layer): every
+    /// state change becomes IslandMotion's ~150 ms fade instead of the spring.
+    /// Defaults to false — --render-preview stays static and unaffected.
+    var reduceMotion: Bool
     /// ImageRenderer cannot rasterize AppKit-backed controls (TextField);
     /// --render-preview sets this to draw a static stand-in instead.
     var staticRendering: Bool
@@ -61,22 +82,26 @@ struct IslandView: View {
     init(
         state: IslandState,
         layout: IslandLayout = .default,
+        reduceMotion: Bool = false,
         onHoverChanged: @escaping (Bool) -> Void = { _ in },
         onIslandTap: @escaping () -> Void = {},
         onSubmit: @escaping (String) -> Void = { _ in },
         captureRestoreInput: @escaping () -> String? = { nil },
         onOpenInTerminal: @escaping (ResumeAction) -> Void = { _ in },
         onCopyCommand: @escaping (ResumeAction) -> Void = { _ in },
+        onOpenSettings: @escaping () -> Void = {},
         staticRendering: Bool = false
     ) {
         self.state = state
         self.layout = layout
+        self.reduceMotion = reduceMotion
         self.onHoverChanged = onHoverChanged
         self.onIslandTap = onIslandTap
         self.onSubmit = onSubmit
         self.captureRestoreInput = captureRestoreInput
         self.onOpenInTerminal = onOpenInTerminal
         self.onCopyCommand = onCopyCommand
+        self.onOpenSettings = onOpenSettings
         self.staticRendering = staticRendering
     }
 
@@ -93,14 +118,16 @@ struct IslandView: View {
             return CGSize(width: layout.windowSize.width, height: 120)
         case let .peek(content):
             // Failure peeks grow with their message (§6: headline + up to 3
-            // stderr-tail lines) and carry two extra buttons when resumable.
-            if case let .failure(message, resume) = content {
+            // stderr-tail lines) and carry a button row when resumable (§6
+            // escape hatch) or when configuration guidance offers Settings.
+            if case let .failure(message, resume, configuration) = content {
+                let hasButtons = resume != nil || configuration
                 let lines = min(
                     message.split(separator: "\n", omittingEmptySubsequences: false).count, 4
                 )
-                let buttonRow: CGFloat = resume != nil ? 30 : 0
+                let buttonRow: CGFloat = hasButtons ? 30 : 0
                 return CGSize(
-                    width: layout.islandSize.width + (resume != nil ? 340 : 280),
+                    width: layout.islandSize.width + (hasButtons ? 340 : 280),
                     height: layout.islandSize.height + 28 + CGFloat(lines) * 16 + buttonRow
                 )
             }
@@ -136,7 +163,7 @@ struct IslandView: View {
             .contentShape(NotchShape(bottomRadius: bottomRadius))
             .onHover(perform: onHoverChanged)
             .onTapGesture(perform: onIslandTap)
-            .animation(IslandMotion.spring, value: state)
+            .animation(IslandMotion.animation(reduceMotion: reduceMotion), value: state)
             .frame(
                 width: layout.windowSize.width,
                 height: layout.windowSize.height,
@@ -166,7 +193,10 @@ struct IslandView: View {
             )
         case .running:
             // Animated status dot at the notch edge (only animates while a
-            // run is live — nothing animates when idle).
+            // run is live — nothing animates when idle). Reduced motion (§7):
+            // the dot stays solid instead of pulsing — enforced reactively
+            // (`onChange`), so flipping the setting WHILE a run is live stops
+            // or starts the pulse immediately, not just on first appearance.
             Circle()
                 .fill(Color.orange)
                 .frame(width: 6, height: 6)
@@ -174,18 +204,28 @@ struct IslandView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
                 .padding(.bottom, 5)
                 .padding(.trailing, 10)
-                .onAppear {
-                    withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) {
-                        statusDotDimmed = true
-                    }
-                }
+                .onAppear { updateStatusDotPulse() }
+                .onChange(of: reduceMotion) { updateStatusDotPulse() }
                 .onDisappear { statusDotDimmed = false }
         case let .peek(content):
             PeekView(
                 content: content,
                 onOpenInTerminal: onOpenInTerminal,
-                onCopyCommand: onCopyCommand
+                onCopyCommand: onCopyCommand,
+                onOpenSettings: onOpenSettings
             )
+        }
+    }
+
+    /// Starts the pulse (IslandMotion.statusDotPulse) or cancels it: setting
+    /// the value inside `withAnimation(nil)` retargets the opacity without an
+    /// animation, which supersedes an in-flight `repeatForever` — the dot
+    /// snaps solid the moment Reduce Motion turns on.
+    private func updateStatusDotPulse() {
+        if reduceMotion {
+            withAnimation(nil) { statusDotDimmed = false }
+        } else {
+            withAnimation(IslandMotion.statusDotPulse) { statusDotDimmed = true }
         }
     }
 }

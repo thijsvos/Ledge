@@ -32,9 +32,21 @@ public struct ResumeAction: Sendable, Equatable {
 /// What a 2.5 s peek banner shows.
 public enum PeekContent: Sendable, Equatable {
     case success(filesEdited: Int, duration: TimeInterval)
-    case failure(message: String, resume: ResumeAction?)
+    /// `configuration` marks failures whose cause is missing/invalid setup
+    /// (no vault, invalid vault, no binary) rather than a run going wrong.
+    /// A configuration failure with no resume offers "Open Settings…" and its
+    /// tap opens Settings (§7 empty/error-states pass).
+    case failure(message: String, resume: ResumeAction?, configuration: Bool)
     case queued(position: Int)
     case info(message: String)
+}
+
+public extension PeekContent {
+    /// Two-argument convenience keeping Phase-3 call sites/tests source-stable:
+    /// a plain (non-configuration) failure.
+    static func failure(message: String, resume: ResumeAction?) -> PeekContent {
+        .failure(message: message, resume: resume, configuration: false)
+    }
 }
 
 /// The island's UI state (§4).

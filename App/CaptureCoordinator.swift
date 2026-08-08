@@ -23,7 +23,7 @@ protocol AgentRunSubmitting: AnyObject {
 ///     defaults write app.ledge.Ledge vaultPath '<path>'
 @MainActor
 final class CaptureCoordinator {
-    static let vaultPathDefaultsKey = "vaultPath"
+    nonisolated static let vaultPathDefaultsKey = "vaultPath"
 
     private let island: IslandController
     private let defaults: UserDefaults
@@ -36,6 +36,11 @@ final class CaptureCoordinator {
     /// island opens.
     private var restoreInput: String?
     private let logger = Logger(subsystem: "app.ledge", category: "capture")
+    /// §10 hard budget "Enter→instant-capture file written ≤50 ms" is checked
+    /// by scripts/perf-check.sh from this signposter's `capture.write`
+    /// intervals. Emitted only when a capture actually runs — zero idle cost,
+    /// no timers, no polling (§10).
+    private let signposter = OSSignposter(subsystem: "app.ledge", category: "perf")
 
     init(
         island: IslandController,
@@ -106,12 +111,21 @@ final class CaptureCoordinator {
             !path.isEmpty
         else {
             logger.error("instant capture with no vault configured")
+            // Configuration failure: the peek offers "Open Settings…" and its
+            // tap opens Settings (§7 empty/error-states pass).
             island.transition(to: .peek(.failure(
-                message: "No vault set — Settings arrive in Phase 4",
-                resume: nil
+                message: "No vault set — open Settings…",
+                resume: nil,
+                configuration: true
             )))
             return false
         }
+        // The interval brackets vault validation + the write — the §10
+        // "Enter→file written" work (submit calls this synchronously on
+        // Enter; routing above it is microseconds). Ended on both paths so
+        // begins are never left dangling; the resulting peek transition is
+        // deliberately OUTSIDE the interval.
+        let interval = signposter.beginInterval("capture.write", id: signposter.makeSignpostID())
         do {
             let root = URL(
                 fileURLWithPath: (path as NSString).expandingTildeInPath,
@@ -120,6 +134,7 @@ final class CaptureCoordinator {
             let vault = try Vault(root: root)
             let started = Date()
             let outcome = try InstantCapture.capture(text, target: target, in: vault)
+            signposter.endInterval("capture.write", interval)
             if outcome.fellBackToDaily {
                 island.transition(to: .peek(.info(message: "saved to daily (no inbox note)")))
             } else {
@@ -130,8 +145,15 @@ final class CaptureCoordinator {
             }
             return true
         } catch {
+            signposter.endInterval("capture.write", interval)
             logger.error("instant capture failed: \(error.localizedDescription, privacy: .public)")
-            island.transition(to: .peek(.failure(message: Self.message(for: error), resume: nil)))
+            // Vault validation failures are configuration problems (fixable
+            // in Settings); anything else is a plain write failure.
+            island.transition(to: .peek(.failure(
+                message: Self.message(for: error),
+                resume: nil,
+                configuration: error is VaultError
+            )))
             return false
         }
     }
