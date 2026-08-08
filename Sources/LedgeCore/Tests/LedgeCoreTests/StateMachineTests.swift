@@ -110,6 +110,31 @@ final class StateMachineTests: XCTestCase {
         XCTAssertNil(controller.liveRun)
     }
 
+    /// `setLiveRun` records a run WITHOUT a state transition — a queued run
+    /// starting behind a completion peek (or the open field) must not destroy
+    /// what the user is looking at.
+    func testSetLiveRunDoesNotChangeState() {
+        let peeking = makeController(in: .peek(peekContent))
+        peeking.setLiveRun(handle)
+        XCTAssertEqual(peeking.state, .peek(peekContent), "setLiveRun must not transition")
+        XCTAssertEqual(peeking.liveRun, handle)
+
+        let open = makeController(in: .open)
+        open.setLiveRun(otherHandle)
+        XCTAssertEqual(open.state, .open)
+        XCTAssertEqual(open.liveRun, otherHandle)
+    }
+
+    /// After the peek expires, the island falls back to the run recorded via
+    /// setLiveRun — the next queued run's dot appears once the banner is done.
+    func testPeekExpiryFallsBackToRunSetViaSetLiveRun() async throws {
+        let controller = IslandController(peekDuration: 0.05)
+        controller.transition(to: .peek(.success(filesEdited: 1, duration: 1)))
+        controller.setLiveRun(handle) // next queued run started behind the peek
+        try await Task.sleep(for: .milliseconds(500))
+        XCTAssertEqual(controller.state, .running(handle))
+    }
+
     // MARK: - Peek expiry
 
     func testPeekExpiryReturnsToRunningWhenLiveRunSet() async throws {

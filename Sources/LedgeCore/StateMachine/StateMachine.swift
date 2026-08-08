@@ -16,10 +16,23 @@ public struct RunHandle: Sendable, Equatable {
     }
 }
 
+/// The §6 escape hatch attached to a failure peek: everything needed to
+/// resume the exact session in a real terminal ("Open in Terminal" / "Copy
+/// command"). Nil when there is no session to resume.
+public struct ResumeAction: Sendable, Equatable {
+    public let vaultPath: String
+    public let sessionID: String
+
+    public init(vaultPath: String, sessionID: String) {
+        self.vaultPath = vaultPath
+        self.sessionID = sessionID
+    }
+}
+
 /// What a 2.5 s peek banner shows.
 public enum PeekContent: Sendable, Equatable {
     case success(filesEdited: Int, duration: TimeInterval)
-    case failure(message: String)
+    case failure(message: String, resume: ResumeAction?)
     case queued(position: Int)
     case info(message: String)
 }
@@ -127,6 +140,15 @@ public final class IslandController {
     /// peek expiry then falls back to `.collapsed` instead of `.running`.
     public func clearLiveRun() {
         liveRun = nil
+    }
+
+    /// Phase-3 runner bookkeeping: records a newly started run WITHOUT a state
+    /// transition. Used when the island is showing something that must not be
+    /// interrupted — the previous run's completion peek, or the open capture
+    /// field (whose typed text a transition would destroy). The current UI
+    /// stays; peek expiry and dismiss then fall back to `.running(handle)`.
+    public func setLiveRun(_ handle: RunHandle) {
+        liveRun = handle
     }
 
     private func isLegal(from: IslandState, to: IslandState) -> Bool {

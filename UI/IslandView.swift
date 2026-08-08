@@ -48,6 +48,10 @@ struct IslandView: View {
     /// failed capture's text — see CaptureCoordinator). Defaulted so
     /// `IslandView(state:)` stays constructible with no coordinator.
     var captureRestoreInput: () -> String?
+    /// §6 escape hatch handlers for failure peeks (App layer: script + open /
+    /// pasteboard). Defaulted so `IslandView(state:)` stays constructible.
+    var onOpenInTerminal: (ResumeAction) -> Void
+    var onCopyCommand: (ResumeAction) -> Void
     /// ImageRenderer cannot rasterize AppKit-backed controls (TextField);
     /// --render-preview sets this to draw a static stand-in instead.
     var staticRendering: Bool
@@ -61,6 +65,8 @@ struct IslandView: View {
         onIslandTap: @escaping () -> Void = {},
         onSubmit: @escaping (String) -> Void = { _ in },
         captureRestoreInput: @escaping () -> String? = { nil },
+        onOpenInTerminal: @escaping (ResumeAction) -> Void = { _ in },
+        onCopyCommand: @escaping (ResumeAction) -> Void = { _ in },
         staticRendering: Bool = false
     ) {
         self.state = state
@@ -69,6 +75,8 @@ struct IslandView: View {
         self.onIslandTap = onIslandTap
         self.onSubmit = onSubmit
         self.captureRestoreInput = captureRestoreInput
+        self.onOpenInTerminal = onOpenInTerminal
+        self.onCopyCommand = onCopyCommand
         self.staticRendering = staticRendering
     }
 
@@ -77,14 +85,29 @@ struct IslandView: View {
     static func shapeSize(for state: IslandState, layout: IslandLayout) -> CGSize {
         switch state {
         case .collapsed, .running:
-            layout.islandSize
+            return layout.islandSize
         case .hover:
             // "Grown ~10 pt": 10 pt per side horizontally, 10 pt down.
-            CGSize(width: layout.islandSize.width + 20, height: layout.islandSize.height + 10)
+            return CGSize(width: layout.islandSize.width + 20, height: layout.islandSize.height + 10)
         case .open:
-            CGSize(width: layout.windowSize.width, height: 120)
-        case .peek:
-            CGSize(width: layout.islandSize.width + 280, height: layout.islandSize.height + 44)
+            return CGSize(width: layout.windowSize.width, height: 120)
+        case let .peek(content):
+            // Failure peeks grow with their message (§6: headline + up to 3
+            // stderr-tail lines) and carry two extra buttons when resumable.
+            if case let .failure(message, resume) = content {
+                let lines = min(
+                    message.split(separator: "\n", omittingEmptySubsequences: false).count, 4
+                )
+                let buttonRow: CGFloat = resume != nil ? 30 : 0
+                return CGSize(
+                    width: layout.islandSize.width + (resume != nil ? 340 : 280),
+                    height: layout.islandSize.height + 28 + CGFloat(lines) * 16 + buttonRow
+                )
+            }
+            return CGSize(
+                width: layout.islandSize.width + 280,
+                height: layout.islandSize.height + 44
+            )
         }
     }
 
@@ -158,35 +181,11 @@ struct IslandView: View {
                 }
                 .onDisappear { statusDotDimmed = false }
         case let .peek(content):
-            peekBody(content)
+            PeekView(
+                content: content,
+                onOpenInTerminal: onOpenInTerminal,
+                onCopyCommand: onCopyCommand
+            )
         }
-    }
-
-    private func peekBody(_ content: PeekContent) -> some View {
-        HStack(spacing: 6) {
-            switch content {
-            case let .success(filesEdited, duration):
-                Image(systemName: "checkmark")
-                    .foregroundStyle(.green)
-                Text("\(filesEdited) file\(filesEdited == 1 ? "" : "s") · \(Int(duration.rounded()))s")
-            case let .failure(message):
-                Image(systemName: "xmark")
-                    .foregroundStyle(.red)
-                Text(message)
-                    .lineLimit(1)
-            case let .queued(position):
-                Image(systemName: "clock")
-                    .foregroundStyle(.yellow)
-                Text("Queued #\(position)")
-            case let .info(message):
-                Text(message)
-                    .lineLimit(1)
-            }
-        }
-        .font(.system(size: 12, weight: .medium))
-        .foregroundStyle(.white)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-        .padding(.bottom, 8)
-        .padding(.horizontal, 16)
     }
 }

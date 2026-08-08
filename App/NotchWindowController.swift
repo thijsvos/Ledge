@@ -11,6 +11,8 @@ struct NotchRootView: View {
     var onTap: () -> Void
     var onSubmit: (String) -> Void
     var captureRestoreInput: () -> String?
+    var onOpenInTerminal: (ResumeAction) -> Void
+    var onCopyCommand: (ResumeAction) -> Void
 
     var body: some View {
         IslandView(
@@ -19,7 +21,9 @@ struct NotchRootView: View {
             onHoverChanged: onHoverChanged,
             onIslandTap: onTap,
             onSubmit: onSubmit,
-            captureRestoreInput: captureRestoreInput
+            captureRestoreInput: captureRestoreInput,
+            onOpenInTerminal: onOpenInTerminal,
+            onCopyCommand: onCopyCommand
         )
     }
 }
@@ -30,6 +34,7 @@ struct NotchRootView: View {
 final class NotchWindowController: NSObject {
     let island: IslandController
 
+    private let agentRunController: AgentRunController
     private let captureCoordinator: CaptureCoordinator
     private let window: NotchWindow
     private let hostingView: NSHostingView<NotchRootView>
@@ -44,7 +49,11 @@ final class NotchWindowController: NSObject {
     override init() {
         let island = IslandController()
         self.island = island
-        captureCoordinator = CaptureCoordinator(island: island)
+        // Phase-3 wiring (§6): the runner façade adopts AgentRunSubmitting;
+        // `/` prompts flow CaptureView → CaptureCoordinator → AgentRunController.
+        let agentRunController = AgentRunController(island: island)
+        self.agentRunController = agentRunController
+        captureCoordinator = CaptureCoordinator(island: island, agentRunner: agentRunController)
         let snapshot = Self.currentScreenSnapshot()
         let geometry = NotchGeometry.geometry(for: snapshot)
         self.geometry = geometry
@@ -57,10 +66,19 @@ final class NotchWindowController: NSObject {
                 onHoverChanged: { _ in },
                 onTap: {},
                 onSubmit: { _ in },
-                captureRestoreInput: { nil }
+                captureRestoreInput: { nil },
+                onOpenInTerminal: { _ in },
+                onCopyCommand: { _ in }
             )
         )
         super.init()
+
+        // A `/` submission rejected before it ever ran hands the prompt back
+        // so the field restores it on the next open — the raw input for an
+        // agent route is "/" + prompt (§5 router). Typed text is never lost.
+        agentRunController.onSubmissionRejected = { [weak self] prompt in
+            self?.captureCoordinator.preserveInput("/" + prompt)
+        }
 
         hostingView.frame = CGRect(origin: .zero, size: geometry.windowFrame.size)
         window.contentView = hostingView
@@ -74,9 +92,12 @@ final class NotchWindowController: NSObject {
         applyWindowSideEffects()
     }
 
-    /// Removes monitors and observers. Called from
-    /// `applicationWillTerminate`; monitors must not outlive the controller.
+    /// Removes monitors and observers, and SIGTERMs any live agent run (§6:
+    /// app quit with a live run terminates the child, persists nothing).
+    /// Called from `applicationWillTerminate`; monitors must not outlive the
+    /// controller.
     func teardown() {
+        agentRunController.shutdown()
         hoverTask?.cancel()
         hoverTask = nil
         if let localMouseMonitor {
@@ -152,7 +173,9 @@ final class NotchWindowController: NSObject {
             onHoverChanged: { [weak self] hovering in self?.hoverChanged(hovering) },
             onTap: { [weak self] in self?.islandTapped() },
             onSubmit: { [weak self] input in self?.captureCoordinator.submit(input) },
-            captureRestoreInput: { [weak self] in self?.captureCoordinator.consumeRestoreInput() }
+            captureRestoreInput: { [weak self] in self?.captureCoordinator.consumeRestoreInput() },
+            onOpenInTerminal: { [weak self] resume in self?.agentRunController.openInTerminal(resume) },
+            onCopyCommand: { [weak self] resume in self?.agentRunController.copyCommand(resume) }
         )
     }
 

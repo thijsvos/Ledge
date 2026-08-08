@@ -25,6 +25,10 @@ enum Fixtures {
         fixturesDir.appendingPathComponent("fake-claude.sh")
     }
 
+    static var liveProbe: URL {
+        fixturesDir.appendingPathComponent("live-probe.ndjson")
+    }
+
     /// Copies the committed fixture vault into a fresh temp directory. Tests
     /// mutate the copy freely; the committed fixtures are NEVER touched.
     /// Callers remove the returned directory in tearDown.

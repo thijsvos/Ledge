@@ -9,6 +9,10 @@ import os
 public enum VaultError: Error, Equatable, Sendable, LocalizedError {
     case rootDoesNotExist(path: String)
     case rootIsNotADirectory(path: String)
+    /// §2.5: the agent's cwd is never `/`.
+    case rootIsFilesystemRoot
+    /// §2.5: the agent's cwd is never `~`.
+    case rootIsHomeDirectory(path: String)
 
     public var errorDescription: String? {
         switch self {
@@ -16,6 +20,10 @@ public enum VaultError: Error, Equatable, Sendable, LocalizedError {
             "Vault folder does not exist: \(path)"
         case let .rootIsNotADirectory(path):
             "Vault path is not a folder: \(path)"
+        case .rootIsFilesystemRoot:
+            "Refusing to use the filesystem root as the vault"
+        case let .rootIsHomeDirectory(path):
+            "Refusing to use the home folder as the vault: \(path)"
         }
     }
 }
@@ -38,6 +46,22 @@ public struct Vault: Equatable, Sendable {
             Logger(subsystem: "app.ledge", category: "vault")
                 .error("vault root is not a directory: \(root.path, privacy: .public)")
             throw VaultError.rootIsNotADirectory(path: root.path)
+        }
+        // §2.5 (safety): an unattended acceptEdits agent must never run with
+        // cwd `/` or the user's home folder — refuse both outright. Symlinks
+        // are resolved first so a link to the home directory cannot sneak past.
+        let resolvedPath = root.standardizedFileURL.resolvingSymlinksInPath().path
+        guard resolvedPath != "/" else {
+            Logger(subsystem: "app.ledge", category: "vault")
+                .error("vault root refused: filesystem root (§2.5)")
+            throw VaultError.rootIsFilesystemRoot
+        }
+        let homePath = FileManager.default.homeDirectoryForCurrentUser
+            .standardizedFileURL.resolvingSymlinksInPath().path
+        guard resolvedPath != homePath else {
+            Logger(subsystem: "app.ledge", category: "vault")
+                .error("vault root refused: home directory (§2.5)")
+            throw VaultError.rootIsHomeDirectory(path: root.path)
         }
         self.root = root
     }

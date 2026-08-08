@@ -42,6 +42,41 @@ final class VaultTests: XCTestCase {
         }
     }
 
+    /// §2.5 (safety): cwd is never `/` — an unattended acceptEdits agent must
+    /// not run at the filesystem root.
+    func testInitRefusesFilesystemRoot() {
+        XCTAssertThrowsError(try Vault(root: URL(fileURLWithPath: "/", isDirectory: true))) { error in
+            XCTAssertEqual(error as? VaultError, .rootIsFilesystemRoot)
+        }
+    }
+
+    /// §2.5 (safety): cwd is never `~`.
+    func testInitRefusesHomeDirectory() {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        XCTAssertThrowsError(try Vault(root: home)) { error in
+            guard case .rootIsHomeDirectory = error as? VaultError else {
+                return XCTFail("expected rootIsHomeDirectory, got \(error)")
+            }
+        }
+    }
+
+    /// A symlink pointing at the home directory must not sneak past the §2.5
+    /// guard (symlinks are resolved before comparison).
+    func testInitRefusesSymlinkToHomeDirectory() throws {
+        let link = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ledge-home-link-\(UUID().uuidString)")
+        try FileManager.default.createSymbolicLink(
+            at: link,
+            withDestinationURL: FileManager.default.homeDirectoryForCurrentUser
+        )
+        defer { try? FileManager.default.removeItem(at: link) }
+        XCTAssertThrowsError(try Vault(root: link)) { error in
+            guard case .rootIsHomeDirectory = error as? VaultError else {
+                return XCTFail("expected rootIsHomeDirectory, got \(error)")
+            }
+        }
+    }
+
     // MARK: - Daily note URL (UTC)
 
     func testDailyNoteURLUsesUTCCalendarDay() throws {

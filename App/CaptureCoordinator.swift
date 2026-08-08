@@ -79,6 +79,15 @@ final class CaptureCoordinator {
         return restoreInput
     }
 
+    /// Preserves input for the next field appearance. Agent submissions that
+    /// were rejected before ever running (no vault, invalid vault, no binary,
+    /// queue full) report back through `AgentRunController.onSubmissionRejected`
+    /// → here, mirroring the failed-instant-capture path: typed text is never
+    /// lost to a failure peek.
+    func preserveInput(_ input: String) {
+        restoreInput = input
+    }
+
     /// Mirrors `NotchWindowController.dismissToIdle`: idle is
     /// `.running(liveRun)` while an agent run is live, else `.collapsed`.
     private func dismissToIdle() {
@@ -97,7 +106,10 @@ final class CaptureCoordinator {
             !path.isEmpty
         else {
             logger.error("instant capture with no vault configured")
-            island.transition(to: .peek(.failure(message: "No vault set — Settings arrive in Phase 4")))
+            island.transition(to: .peek(.failure(
+                message: "No vault set — Settings arrive in Phase 4",
+                resume: nil
+            )))
             return false
         }
         do {
@@ -119,7 +131,7 @@ final class CaptureCoordinator {
             return true
         } catch {
             logger.error("instant capture failed: \(error.localizedDescription, privacy: .public)")
-            island.transition(to: .peek(.failure(message: Self.message(for: error))))
+            island.transition(to: .peek(.failure(message: Self.message(for: error), resume: nil)))
             return false
         }
     }
