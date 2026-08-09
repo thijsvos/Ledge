@@ -137,6 +137,36 @@ final class ClaudeRunnerTests: XCTestCase {
         )
     }
 
+    func testModelAndEffortOverridesAppendAfterThePinnedInvocation() {
+        let args = ClaudeRunner.arguments(
+            prompt: "p", resumeSessionID: "abc-123", model: "sonnet", effort: "high"
+        )
+        // The §2.3 sandbox prefix is untouched…
+        XCTAssertEqual(
+            Array(args.prefix(11)),
+            ClaudeRunner.arguments(prompt: "p", resumeSessionID: nil)
+        )
+        // …and the overrides slot in before --resume.
+        XCTAssertEqual(
+            Array(args.suffix(6)),
+            ["--model", "sonnet", "--effort", "high", "--resume", "abc-123"]
+        )
+    }
+
+    func testOverrideSanitizerDropsEmptyWhitespaceAndFlagLikeValues() {
+        XCTAssertEqual(ClaudeRunner.sanitizeOverride("  sonnet\n"), "sonnet")
+        XCTAssertNil(ClaudeRunner.sanitizeOverride(nil))
+        XCTAssertNil(ClaudeRunner.sanitizeOverride(""))
+        XCTAssertNil(ClaudeRunner.sanitizeOverride("   "))
+        XCTAssertNil(ClaudeRunner.sanitizeOverride("--allowedTools"))
+        XCTAssertNil(ClaudeRunner.sanitizeOverride("-x"))
+        // A dropped override must leave the argv byte-identical to no override.
+        XCTAssertEqual(
+            ClaudeRunner.arguments(prompt: "p", resumeSessionID: nil, model: "-bad", effort: " "),
+            ClaudeRunner.arguments(prompt: "p", resumeSessionID: nil)
+        )
+    }
+
     // MARK: - Lifecycle vs fake-claude.sh
 
     func testSuccessRunSummary() async throws {

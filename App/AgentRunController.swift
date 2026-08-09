@@ -37,6 +37,8 @@ final class AgentRunController: AgentRunSubmitting {
     private var runner: ClaudeRunner?
     private var runnerVaultPath: String?
     private var runnerBinaryPath: String?
+    private var runnerModel: String?
+    private var runnerEffort: String?
     private var eventsTask: Task<Void, Never>?
     /// Drains a retired runner (vault/binary changed): terminateAll SIGTERMs,
     /// escalates to SIGKILL, and returns only once the old child is dead.
@@ -79,6 +81,22 @@ final class AgentRunController: AgentRunSubmitting {
     private static func storedOverride(in defaults: UserDefaults) -> String? {
         defaults.string(forKey: DefaultsKey.claudeBinaryPath)
             .flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    /// The §7-adjacent model/effort overrides for agent runs, snapshotted per
+    /// Enter (same enqueue-time semantics as the resume ID). Model: empty =
+    /// the user's own Claude Code default. Effort: absent = Ledge's default
+    /// "high"; the `effortCLIDefault` sentinel = pass no flag.
+    private func storedModelOverride() -> String? {
+        ClaudeRunner.sanitizeOverride(defaults.string(forKey: DefaultsKey.claudeModel))
+    }
+
+    private func storedEffort() -> String? {
+        guard let raw = defaults.string(forKey: DefaultsKey.claudeEffort) else { return "high" }
+        if raw == DefaultsKey.effortCLIDefault {
+            return nil
+        }
+        return ClaudeRunner.sanitizeOverride(raw) ?? "high"
     }
 
     /// Returns the resolver matching the CURRENT Settings override, rebuilding
@@ -143,6 +161,8 @@ final class AgentRunController: AgentRunSubmitting {
         island.transition(to: .running(liveHandle ?? RunHandle(prompt: prompt)))
 
         let resolver = currentResolver()
+        let model = storedModelOverride()
+        let effort = storedEffort()
         let previousSubmission = submissionChain
         submissionChain = Task { [weak self] in
             // FIFO discipline: this Enter's pipeline starts only after the
@@ -159,7 +179,13 @@ final class AgentRunController: AgentRunSubmitting {
                 )
                 return
             }
-            let runner = ensureRunner(vault: vault, vaultPath: vaultPath, binaryPath: binaryPath)
+            let runner = ensureRunner(
+                vault: vault,
+                vaultPath: vaultPath,
+                binaryPath: binaryPath,
+                model: model,
+                effort: effort
+            )
             // Never enqueue while a retired runner's child may still be alive.
             await retirementDrain?.value
             let enqueued = await runner.enqueue(
@@ -221,12 +247,20 @@ final class AgentRunController: AgentRunSubmitting {
 
     // MARK: - Runner lifetime & events
 
-    private func ensureRunner(vault: Vault, vaultPath: String, binaryPath: String) -> ClaudeRunner {
-        if let runner, runnerVaultPath == vaultPath, runnerBinaryPath == binaryPath {
+    private func ensureRunner(
+        vault: Vault,
+        vaultPath: String,
+        binaryPath: String,
+        model: String?,
+        effort: String?
+    ) -> ClaudeRunner {
+        if let runner, runnerVaultPath == vaultPath, runnerBinaryPath == binaryPath,
+           runnerModel == model, runnerEffort == effort
+        {
             return runner
         }
         if let previous = runner {
-            logger.info("vault or binary changed — retiring previous runner")
+            logger.info("vault, binary, model, or effort changed — retiring previous runner")
             eventsTask?.cancel()
             // The retired runner's events are never handled (the identity
             // guard below drops any already-in-flight one), so clear the
@@ -247,11 +281,15 @@ final class AgentRunController: AgentRunSubmitting {
         }
         let created = ClaudeRunner(configuration: ClaudeRunner.Configuration(
             binaryURL: URL(fileURLWithPath: binaryPath),
-            vault: vault
+            vault: vault,
+            model: model,
+            effort: effort
         ))
         runner = created
         runnerVaultPath = vaultPath
         runnerBinaryPath = binaryPath
+        runnerModel = model
+        runnerEffort = effort
         queueDepth = 0
         eventsTask = Task { [weak self] in
             for await event in created.events {

@@ -14,6 +14,8 @@ struct SettingsView: View {
     @AppStorage(DefaultsKey.vaultPath) private var vaultPath = ""
     @AppStorage(DefaultsKey.claudeBinaryPath) private var claudeBinaryPath = ""
     @AppStorage(DefaultsKey.continueLastSession) private var continueLastSession = false
+    @AppStorage(DefaultsKey.claudeModel) private var claudeModel = ""
+    @AppStorage(DefaultsKey.claudeEffort) private var claudeEffort = "high"
     @State private var loginItemStatus = SMAppService.mainApp.status
     @State private var loginItemErrorMessage: String?
 
@@ -35,7 +37,7 @@ struct SettingsView: View {
             checksSection
         }
         .formStyle(.grouped)
-        .frame(width: 480, height: 470)
+        .frame(width: 480, height: 560)
         .onAppear { loginItemStatus = SMAppService.mainApp.status }
         .onChange(of: refreshTick) { loginItemStatus = SMAppService.mainApp.status }
     }
@@ -168,6 +170,26 @@ struct SettingsView: View {
                 Text("Optional override — leave empty to auto-detect the claude CLI")
                     .font(.callout)
                     .foregroundStyle(.secondary)
+            }
+            // Model/effort select WHICH model does the note-work; the §2.3
+            // sandbox flags (allowedTools, acceptEdits, max-turns) are pinned
+            // in LedgeCore and not configurable here.
+            HStack {
+                TextField(
+                    "Model",
+                    text: $claudeModel,
+                    prompt: Text("Your Claude Code default")
+                )
+                Text("e.g. sonnet, haiku, opus")
+                    .font(.callout)
+                    .foregroundStyle(.tertiary)
+            }
+            Picker("Effort", selection: $claudeEffort) {
+                Text("CLI default").tag(DefaultsKey.effortCLIDefault)
+                Text("low").tag("low")
+                Text("medium").tag("medium")
+                Text("high (Ledge default)").tag("high")
+                Text("xhigh").tag("xhigh")
             }
         }
     }

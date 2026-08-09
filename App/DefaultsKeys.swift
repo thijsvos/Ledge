@@ -8,6 +8,15 @@ enum DefaultsKey {
     static let claudeBinaryPath = "claudeBinaryPath"
     /// "Continue last session for / runs" toggle; default false (§7).
     static let continueLastSession = "continueLastSession"
+    /// Optional `--model` for agent runs; empty/absent = the user's own
+    /// Claude Code default.
+    static let claudeModel = "claudeModel"
+    /// `--effort` for agent runs. Absent = Ledge's default "high" (note-work
+    /// doesn't need the user's heavier interactive default); the sentinel
+    /// `effortCLIDefault` = pass no flag, use the CLI's own default.
+    static let claudeEffort = "claudeEffort"
+    /// Sentinel stored in `claudeEffort` meaning "no --effort flag".
+    static let effortCLIDefault = "default"
     /// True once the user has finished (dismissed) first-launch onboarding.
     static let hasRunOnboarding = "hasRunOnboarding"
 

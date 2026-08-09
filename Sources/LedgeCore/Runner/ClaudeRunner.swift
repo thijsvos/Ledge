@@ -117,19 +117,30 @@ public actor ClaudeRunner {
         public var timeout: TimeInterval
         /// SIGTERM → SIGKILL grace (5 s per §6; injectable).
         public var killGracePeriod: TimeInterval
+        /// Optional `--model` override (Settings; nil = the user's own Claude
+        /// Code default). Sanitized by `sanitizeOverride` before argv.
+        public var model: String?
+        /// Optional `--effort` level (Settings; nil = the CLI default). Ledge
+        /// defaults this to "high" at the App layer — note-work doesn't need
+        /// the user's heavier interactive default. Sanitized like `model`.
+        public var effort: String?
 
         public init(
             binaryURL: URL,
             vault: Vault,
             environment: [String: String] = ProcessInfo.processInfo.environment,
             timeout: TimeInterval = 120,
-            killGracePeriod: TimeInterval = 5
+            killGracePeriod: TimeInterval = 5,
+            model: String? = nil,
+            effort: String? = nil
         ) {
             self.binaryURL = binaryURL
             self.vault = vault
             self.environment = environment
             self.timeout = timeout
             self.killGracePeriod = killGracePeriod
+            self.model = model
+            self.effort = effort
         }
     }
 
@@ -266,8 +277,14 @@ public actor ClaudeRunner {
 
     /// The exact argv (after the binary path). Public so tests pin it —
     /// `--verbose` is REQUIRED with print-mode stream-json (live-probe
-    /// finding) and the tool list is exactly §2.3's.
-    public static func arguments(prompt: String, resumeSessionID: String?) -> [String] {
+    /// finding) and the tool list is exactly §2.3's. `model`/`effort` only
+    /// select which model does the work — they never widen the §2.3 sandbox.
+    public static func arguments(
+        prompt: String,
+        resumeSessionID: String?,
+        model: String? = nil,
+        effort: String? = nil
+    ) -> [String] {
         var args = [
             "-p", prompt,
             "--output-format", "stream-json",
@@ -276,10 +293,26 @@ public actor ClaudeRunner {
             "--permission-mode", "acceptEdits",
             "--max-turns", "6",
         ]
+        if let model = sanitizeOverride(model) {
+            args += ["--model", model]
+        }
+        if let effort = sanitizeOverride(effort) {
+            args += ["--effort", effort]
+        }
         if let resumeSessionID {
             args += ["--resume", resumeSessionID]
         }
         return args
+    }
+
+    /// Last-mile guard for the free-text overrides: trims whitespace, and a
+    /// value that is empty or could parse as a flag (leading "-") is dropped
+    /// entirely — a Settings typo must never rewrite the pinned invocation.
+    public static func sanitizeOverride(_ raw: String?) -> String? {
+        guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty, !trimmed.hasPrefix("-")
+        else { return nil }
+        return trimmed
     }
 
     /// Test hook: is the most recently spawned child still alive?
@@ -358,7 +391,9 @@ public actor ClaudeRunner {
         process.executableURL = configuration.binaryURL
         process.arguments = Self.arguments(
             prompt: run.handle.prompt,
-            resumeSessionID: run.resumeSessionID
+            resumeSessionID: run.resumeSessionID,
+            model: configuration.model,
+            effort: configuration.effort
         )
         process.currentDirectoryURL = configuration.vault.root // §2.5, never ~ or /
         // Live-probe finding: without an attached stdin the CLI stalls ~3 s
