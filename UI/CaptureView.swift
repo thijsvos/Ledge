@@ -133,11 +133,22 @@ struct CaptureView: View {
             Spacer()
         }
         .padding(.horizontal, 24)
+        .defaultFocus($fieldFocused, true)
         .onAppear {
             // Fresh field per open (matching the old @State behavior);
             // restore fills it only after a failed capture.
             model.text = restoreInput() ?? ""
             fieldFocused = true
+            // Belt-and-braces for the hotkey path: if the panel gained key
+            // status a beat after this view appeared, the request above was
+            // dropped (fieldFocused reads back false). One bounded retry —
+            // not polling — re-lands it.
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(80))
+                if !staticRendering, !fieldFocused {
+                    fieldFocused = true
+                }
+            }
         }
     }
 

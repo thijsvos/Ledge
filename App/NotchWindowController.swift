@@ -331,6 +331,11 @@ final class NotchWindowController: NSObject {
             resumePickerModel.deactivate()
         }
         island.transition(to: .open)
+        // Synchronous, not observation-driven: the panel must be ABLE to
+        // become key before SwiftUI's next render fires the capture field's
+        // focus request — a request landing while canBecomeKey is false is
+        // silently dropped and the user has to click the field.
+        applyWindowSideEffects()
         if !wasAlreadyOpen {
             scanSlashCommands()
         }
@@ -349,6 +354,9 @@ final class NotchWindowController: NSObject {
         } else {
             resumePickerModel.deactivate() // open always starts in capture mode
             island.transition(to: .open)
+            // Same synchronous key grant as islandTapped — the hotkey path
+            // must have the panel key before the field's focus request lands.
+            applyWindowSideEffects()
             scanSlashCommands()
         }
     }
