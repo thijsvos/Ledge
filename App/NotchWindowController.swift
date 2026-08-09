@@ -11,6 +11,7 @@ struct NotchRootView: View {
     var reduceMotion: Bool
     var suggestionModel: SlashSuggestionModel
     var pickerModel: ResumePickerModel
+    var openLayoutModel: OpenLayoutModel
     var onHoverChanged: (Bool) -> Void
     var onTap: () -> Void
     var onSubmit: (String) -> Void
@@ -27,6 +28,7 @@ struct NotchRootView: View {
             reduceMotion: reduceMotion,
             suggestionModel: suggestionModel,
             pickerModel: pickerModel,
+            openLayoutModel: openLayoutModel,
             onHoverChanged: onHoverChanged,
             onIslandTap: onTap,
             onSubmit: onSubmit,
@@ -81,6 +83,13 @@ final class NotchWindowController: NSObject {
     /// every transition into `.open`, so a reopened island always starts in
     /// normal capture mode.
     private let resumePickerModel = ResumePickerModel()
+    /// The capture field's measured wrap growth (published by CaptureView's
+    /// height preference). ONE instance feeds both IslandView's drawn shape
+    /// and this controller's click-outside hit-test — the two must read the
+    /// same number or clicks near the grown field's bottom edge would fall
+    /// through or dead-zone. Reset on every dismiss and on every transition
+    /// into `.open` (fresh field), like the picker model.
+    private let openLayoutModel = OpenLayoutModel()
     /// The user's Claude Code commands/skills, rescanned by
     /// `scanSlashCommands()` once per transition into `.open` — event-driven,
     /// zero polling/timers/watchers (§10). NOT shown in the suggestion list
@@ -110,6 +119,7 @@ final class NotchWindowController: NSObject {
                 reduceMotion: false,
                 suggestionModel: suggestionModel,
                 pickerModel: resumePickerModel,
+                openLayoutModel: openLayoutModel,
                 onHoverChanged: { _ in },
                 onTap: {},
                 onSubmit: { _ in },
@@ -280,6 +290,7 @@ final class NotchWindowController: NSObject {
             reduceMotion: reduceMotion,
             suggestionModel: suggestionModel,
             pickerModel: resumePickerModel,
+            openLayoutModel: openLayoutModel,
             onHoverChanged: { [weak self] hovering in self?.hoverChanged(hovering) },
             onTap: { [weak self] in self?.islandTapped() },
             onSubmit: { [weak self] input in self?.captureCoordinator.submit(input) },
@@ -325,10 +336,14 @@ final class NotchWindowController: NSObject {
         }
         // Scan only on the actual transition INTO .open — a tap while
         // already open must not rescan. Every entry into .open starts in
-        // normal capture mode (the /resume picker never survives a reopen).
+        // normal capture mode (the /resume picker never survives a reopen)
+        // and at the base height (a fresh field is one line; some paths out
+        // of .open — e.g. submit collapsing into a peek — bypass
+        // dismissToIdle, so the measurement is reset on entry as well).
         let wasAlreadyOpen = island.state == .open
         if !wasAlreadyOpen {
             resumePickerModel.deactivate()
+            openLayoutModel.reset()
         }
         island.transition(to: .open)
         // Synchronous, not observation-driven: the panel must be ABLE to
@@ -353,6 +368,7 @@ final class NotchWindowController: NSObject {
             dismissToIdle()
         } else {
             resumePickerModel.deactivate() // open always starts in capture mode
+            openLayoutModel.reset() // …and at the base height (fresh one-line field)
             island.transition(to: .open)
             // Same synchronous key grant as islandTapped — the hotkey path
             // must have the panel key before the field's focus request lands.
@@ -433,6 +449,10 @@ final class NotchWindowController: NSObject {
         // picker is up therefore collapses in ONE press (exit picker AND
         // collapse), and the next open starts in normal capture mode.
         resumePickerModel.deactivate()
+        // The measured field height dies with its field, for the same reason
+        // the typeahead text is cleared above: a stale wrap-grown measurement
+        // would briefly draw (and hit-test) a too-tall open shape next time.
+        openLayoutModel.reset()
         if let run = island.liveRun {
             island.transition(to: .running(run))
         } else {
@@ -601,13 +621,16 @@ final class NotchWindowController: NSObject {
         }
         // Same numbers IslandView draws with: shape is top-centered in the
         // constant window frame (including the suggestion-list or picker
-        // growth, so a click on a row is never mistaken for click-outside).
+        // growth AND the wrap-grown capture field, so a click on a row or
+        // near the grown field's bottom edge is never mistaken for
+        // click-outside).
         let size = IslandView.shapeSize(
             for: island.state,
             layout: layout,
             openSuggestionRows: suggestionModel.visibleRowCount,
             openPickerRows: resumePickerModel.isActive
-                ? max(1, resumePickerModel.visibleRowCount) : 0
+                ? max(1, resumePickerModel.visibleRowCount) : 0,
+            openFieldExtraHeight: openLayoutModel.fieldExtraHeight
         )
         let shapeRect = CGRect(
             x: (window.frame.width - size.width) / 2,

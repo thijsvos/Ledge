@@ -85,6 +85,11 @@ struct IslandView: View {
     /// default, and what --render-preview gets — means picker mode never
     /// renders; previews are unchanged.
     var pickerModel: ResumePickerModel?
+    /// The capture field's measured wrap growth (owned by the window
+    /// controller; CaptureView publishes into it). Nil — the default, and
+    /// what --render-preview gets — means the open shape never grows with
+    /// the field; previews are unchanged.
+    var openLayoutModel: OpenLayoutModel?
     /// Picker row click → resume that session (App layer).
     var onPickerSelect: (RunRecord) -> Void
 
@@ -96,6 +101,7 @@ struct IslandView: View {
         reduceMotion: Bool = false,
         suggestionModel: SlashSuggestionModel? = nil,
         pickerModel: ResumePickerModel? = nil,
+        openLayoutModel: OpenLayoutModel? = nil,
         onHoverChanged: @escaping (Bool) -> Void = { _ in },
         onIslandTap: @escaping () -> Void = {},
         onSubmit: @escaping (String) -> Void = { _ in },
@@ -111,6 +117,7 @@ struct IslandView: View {
         self.reduceMotion = reduceMotion
         self.suggestionModel = suggestionModel
         self.pickerModel = pickerModel
+        self.openLayoutModel = openLayoutModel
         self.onHoverChanged = onHoverChanged
         self.onIslandTap = onIslandTap
         self.onSubmit = onSubmit
@@ -134,9 +141,13 @@ struct IslandView: View {
     /// row + hint + stack gaps) plus 5 fixed-height rows would need ≥ 205 pt
     /// inside the 200 pt window and clip the bottom row — see
     /// `SlashSuggestionModel.maxVisibleRows`.
+    ///
+    /// `openFieldExtraHeight` (only meaningful for `.open`) is the capture
+    /// field's measured wrap growth (`OpenLayoutModel.fieldExtraHeight`); it
+    /// grows the shape the same way and WINS the row budget — see `openPlan`.
     static func shapeSize(
         for state: IslandState, layout: IslandLayout, openSuggestionRows: Int = 0,
-        openPickerRows: Int = 0
+        openPickerRows: Int = 0, openFieldExtraHeight: CGFloat = 0
     ) -> CGSize {
         switch state {
         case .collapsed, .running:
@@ -145,22 +156,14 @@ struct IslandView: View {
             // "Grown ~10 pt": 10 pt per side horizontally, 10 pt down.
             return CGSize(width: layout.islandSize.width + 20, height: layout.islandSize.height + 10)
         case .open:
-            // Picker mode wins (mirrors CaptureView's rendering precedence).
-            // Its base is 90 pt, not 120: the hint line is hidden in picker
-            // mode, which is exactly what lets 5 × 22 pt rows fit inside the
-            // constant 200 pt window (90 + 5 × 22 = 200; the suggestion
-            // list's 120 pt base fits only 4).
-            if openPickerRows > 0 {
-                let pickerRows = CGFloat(min(openPickerRows, ResumePickerModel.maxVisibleRows))
-                return CGSize(
-                    width: layout.windowSize.width,
-                    height: min(90 + pickerRows * ResumePickerList.rowHeight, layout.windowSize.height)
-                )
-            }
-            let rows = CGFloat(min(max(openSuggestionRows, 0), SlashSuggestionModel.maxVisibleRows))
             return CGSize(
                 width: layout.windowSize.width,
-                height: min(120 + rows * SlashSuggestionList.rowHeight, layout.windowSize.height)
+                height: openPlan(
+                    layout: layout,
+                    openSuggestionRows: openSuggestionRows,
+                    openPickerRows: openPickerRows,
+                    openFieldExtraHeight: openFieldExtraHeight
+                ).height
             )
         case let .peek(content):
             // Failure peeks grow with their message (§6: headline + up to 3
@@ -184,6 +187,44 @@ struct IslandView: View {
         }
     }
 
+    /// The `.open` shape's height AND the list-row budget that fits inside
+    /// it, from one `OpenIslandLayout.compute` call (LedgeCore-tested math) —
+    /// ONE function so the drawn shape, the rows CaptureView actually
+    /// renders, and the controller's click-outside hit-test can never
+    /// disagree. The field wins the budget: a wrap-grown field shrinks the
+    /// row budget (to 0 if needed — worst case the list hides) rather than
+    /// ever being clipped; with a one-line field (`openFieldExtraHeight` 0)
+    /// the results are byte-identical to the pre-wrap formulas.
+    ///
+    /// Picker mode wins (mirrors CaptureView's rendering precedence). Its
+    /// base is 90 pt, not 120: the hint line is hidden in picker mode, which
+    /// is exactly what lets 5 × 22 pt rows fit inside the constant 200 pt
+    /// window (90 + 5 × 22 = 200; the suggestion list's 120 pt base fits
+    /// only 4).
+    static func openPlan(
+        layout: IslandLayout, openSuggestionRows: Int, openPickerRows: Int,
+        openFieldExtraHeight: CGFloat
+    ) -> (height: CGFloat, rowBudget: Int) {
+        let plan = if openPickerRows > 0 {
+            OpenIslandLayout.compute(
+                fieldExtraHeight: openFieldExtraHeight,
+                requestedRows: min(openPickerRows, ResumePickerModel.maxVisibleRows),
+                rowHeight: ResumePickerList.rowHeight,
+                baseHeight: 90,
+                maxHeight: layout.windowSize.height
+            )
+        } else {
+            OpenIslandLayout.compute(
+                fieldExtraHeight: openFieldExtraHeight,
+                requestedRows: min(max(openSuggestionRows, 0), SlashSuggestionModel.maxVisibleRows),
+                rowHeight: SlashSuggestionList.rowHeight,
+                baseHeight: 120,
+                maxHeight: layout.windowSize.height
+            )
+        }
+        return (plan.shapeHeight, plan.visibleRows)
+    }
+
     /// Reading `visibleRowCount` in body makes SwiftUI re-render (and the
     /// shape re-size) as typing changes the match list.
     private var openSuggestionRows: Int {
@@ -200,12 +241,22 @@ struct IslandView: View {
         return max(1, pickerModel.visibleRowCount)
     }
 
+    /// The capture field's measured wrap growth — 0 when not open, in static
+    /// previews, or without a layout model (--render-preview's bare
+    /// `IslandView(state:)`). Reading it in body makes SwiftUI re-render (and
+    /// the shape re-size) as typing wraps or unwraps the field.
+    private var openFieldExtra: CGFloat {
+        guard state == .open, !staticRendering, let openLayoutModel else { return 0 }
+        return openLayoutModel.fieldExtraHeight
+    }
+
     private var shapeSize: CGSize {
         Self.shapeSize(
             for: state,
             layout: layout,
             openSuggestionRows: openSuggestionRows,
-            openPickerRows: openPickerRows
+            openPickerRows: openPickerRows,
+            openFieldExtraHeight: openFieldExtra
         )
     }
 
@@ -236,6 +287,9 @@ struct IslandView: View {
             // fade) as state changes.
             .animation(IslandMotion.animation(reduceMotion: reduceMotion), value: openSuggestionRows)
             .animation(IslandMotion.animation(reduceMotion: reduceMotion), value: openPickerRows)
+            // …and the shape growing/shrinking as the capture field wraps
+            // onto more or fewer lines uses that same one animation too.
+            .animation(IslandMotion.animation(reduceMotion: reduceMotion), value: openFieldExtra)
             .frame(
                 width: layout.windowSize.width,
                 height: layout.windowSize.height,
@@ -264,7 +318,17 @@ struct IslandView: View {
                 restoreInput: captureRestoreInput,
                 suggestionModel: suggestionModel,
                 pickerModel: pickerModel,
-                onPickerSelect: onPickerSelect
+                onPickerSelect: onPickerSelect,
+                openLayoutModel: openLayoutModel,
+                // The SAME openPlan the shape is drawn from: rows the grown
+                // field's budget no longer covers are not rendered, so the
+                // list can never paint below the black shape.
+                listRowLimit: Self.openPlan(
+                    layout: layout,
+                    openSuggestionRows: openSuggestionRows,
+                    openPickerRows: openPickerRows,
+                    openFieldExtraHeight: openFieldExtra
+                ).rowBudget
             )
         case .running:
             // Animated status dot at the notch edge (only animates while a

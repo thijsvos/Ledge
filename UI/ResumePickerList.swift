@@ -27,6 +27,12 @@ struct ResumePickerList: View {
     /// Row click → resume that exact session (the window controller routes
     /// this through the same path as Enter on the selected row).
     var onSelect: (RunRecord) -> Void
+    /// Rows the open shape's height budget still covers (from
+    /// `IslandView.openPlan` — a wrap-grown capture field steals row budget).
+    /// The list never renders taller than this; further sessions scroll,
+    /// exactly as they already do beyond `maxVisibleRows`. CaptureView only
+    /// renders the list at all when this is ≥ 1.
+    var rowLimit: Int = .max
 
     /// "now" / "2 min. ago" — named style so a just-recorded run reads as
     /// "now" rather than "in 0 seconds". (The seeded fallback row never uses
@@ -56,7 +62,10 @@ struct ResumePickerList: View {
                     }
                 }
             }
-            .frame(height: CGFloat(max(model.visibleRowCount, 1)) * Self.rowHeight)
+            .frame(
+                height: CGFloat(min(max(model.visibleRowCount, 1), max(rowLimit, 0)))
+                    * Self.rowHeight
+            )
             .onChange(of: model.highlightIndex) { _, index in
                 proxy.scrollTo(index)
             }

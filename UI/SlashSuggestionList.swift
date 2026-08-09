@@ -22,6 +22,12 @@ struct SlashSuggestionList: View {
     static let rowHeight: CGFloat = 22
 
     var model: SlashSuggestionModel
+    /// Rows the open shape's height budget still covers (from
+    /// `IslandView.openPlan` — a wrap-grown capture field steals row budget).
+    /// The list never renders taller than this; further matches scroll,
+    /// exactly as they already do beyond `maxVisibleRows`. CaptureView only
+    /// renders the list at all when this is ≥ 1.
+    var rowLimit: Int = .max
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -37,7 +43,7 @@ struct SlashSuggestionList: View {
                     }
                 }
             }
-            .frame(height: CGFloat(model.visibleRowCount) * Self.rowHeight)
+            .frame(height: CGFloat(min(model.visibleRowCount, max(rowLimit, 0))) * Self.rowHeight)
             .onChange(of: model.highlightIndex) { _, index in
                 proxy.scrollTo(index)
             }

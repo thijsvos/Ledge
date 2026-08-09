@@ -26,6 +26,19 @@ import SwiftUI
 /// picker is active, in `ResumePickerModel.filterText`; each appearance
 /// resets it from `restoreInput`, so a dismissed island still discards its
 /// text exactly as when the text was view-local @State.
+///
+/// The field WRAPS at the right edge (`axis: .vertical`, `.lineLimit(1...4)`
+/// — an empty/short field stays exactly one line, so the base open height is
+/// pixel-unchanged) and grows the island downward; beyond 4 wrapped lines it
+/// scrolls internally. Its rendered height is observed via a GeometryReader
+/// background + PreferenceKey (no timers) and published into the
+/// controller-owned `OpenLayoutModel`, which both `IslandView.shapeSize` and
+/// the controller's click-outside hit-test read. Empirically verified on
+/// this SDK (Xcode 26.6 / macOS 26.5): Return still SUBMITS via `onSubmit`
+/// (no newline is inserted), and Option+Return inserts a literal "\n" —
+/// standard AppKit behavior, no custom key handling. Wrapping is VISUAL
+/// only: `InstantCapture` still flattens hard newlines to spaces, and agent
+/// prompts still carry pasted newlines verbatim.
 struct CaptureView: View {
     /// Points the top spacer clears so content starts below the physical notch.
     var topClearance: CGFloat
@@ -49,6 +62,16 @@ struct CaptureView: View {
     var pickerModel: ResumePickerModel?
     /// Row click in the picker → resume that session.
     var onPickerSelect: (RunRecord) -> Void = { _ in }
+    /// Where the field's measured height is published (owned by the window
+    /// controller — the same instance IslandView and the hit-test read).
+    /// Nil (previews / --render-preview) = never measured, never grown.
+    var openLayoutModel: OpenLayoutModel?
+    /// Rows the open shape's height budget still covers, from the SAME
+    /// `IslandView.openPlan` the shape is drawn with — a wrap-grown field
+    /// steals row budget, and rows without budget must not be rendered (they
+    /// would paint below the black shape). `.max` (previews / fallback)
+    /// keeps the models' own caps as the only limit.
+    var listRowLimit: Int = .max
 
     @State private var fallbackModel = SlashSuggestionModel()
     @FocusState private var fieldFocused: Bool
@@ -107,14 +130,25 @@ struct CaptureView: View {
                 } else {
                     TextField(
                         picker == nil ? Self.placeholder : Self.pickerPlaceholder,
-                        text: fieldText
+                        text: fieldText,
+                        axis: .vertical
                     )
                     .textFieldStyle(.plain)
+                    .lineLimit(1 ... 4) // no reserved space: empty/short stays one line
                     .font(.system(size: 15))
                     .foregroundStyle(.white)
                     .tint(.white)
                     .focused($fieldFocused)
                     .onSubmit(submit)
+                    .background {
+                        // Observes the field's rendered height (macOS 14-safe;
+                        // no timers) — collected by onPreferenceChange below.
+                        GeometryReader { proxy in
+                            Color.clear.preference(
+                                key: CaptureFieldHeightKey.self, value: proxy.size.height
+                            )
+                        }
+                    }
                 }
                 if picker == nil {
                     targetChip
@@ -125,14 +159,27 @@ struct CaptureView: View {
                     .font(.system(size: 10))
                     .foregroundStyle(.white.opacity(0.3))
             }
-            if !staticRendering, let picker {
-                ResumePickerList(model: picker, onSelect: onPickerSelect)
-            } else if !staticRendering, model.isListVisible {
-                SlashSuggestionList(model: model)
+            // listRowLimit == 0 (a tall wrapped field spent the whole row
+            // budget) renders no list AT ALL — not even a zero-height frame,
+            // whose stack spacing would still nudge the layout.
+            if !staticRendering, listRowLimit > 0, let picker {
+                ResumePickerList(model: picker, onSelect: onPickerSelect, rowLimit: listRowLimit)
+            } else if !staticRendering, listRowLimit > 0, model.isListVisible {
+                SlashSuggestionList(model: model, rowLimit: listRowLimit)
             }
             Spacer()
         }
         .padding(.horizontal, 24)
+        .onPreferenceChange(CaptureFieldHeightKey.self) { [openLayoutModel, model, pickerModel] height in
+            // Preferences are delivered on the main thread; the closure is
+            // merely typed non-isolated (and captures only Sendable
+            // @MainActor models), so hop back with assumeIsolated — the same
+            // pattern the window controller's monitors use.
+            MainActor.assumeIsolated {
+                let text = pickerModel?.isActive == true ? pickerModel?.filterText ?? "" : model.text
+                openLayoutModel?.recordFieldHeight(height, fieldIsEmpty: text.isEmpty)
+            }
+        }
         .defaultFocus($fieldFocused, true)
         .onAppear {
             // Fresh field per open (matching the old @State behavior);
@@ -170,5 +217,17 @@ struct CaptureView: View {
         let input = model.text
         model.text = "" // §5: the field clears after submit
         onSubmit(input)
+    }
+}
+
+/// The capture field's rendered height, read from a GeometryReader in its
+/// background and published into `OpenLayoutModel` (see CaptureView's
+/// `onPreferenceChange`). One field, one value — `reduce` keeps the max
+/// defensively, but only a single view ever sets this key.
+private struct CaptureFieldHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
     }
 }
