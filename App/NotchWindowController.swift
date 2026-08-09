@@ -541,6 +541,24 @@ final class NotchWindowController: NSObject {
             return true
         }
 
+        // Shift+Return inserts a newline at the caret — the chat-tool
+        // convention (Option+Return, the AppKit default, keeps working).
+        // Normal capture mode only: a newline is meaningless in the picker's
+        // filter. Going through the field editor keeps selection replacement,
+        // undo, and caret position correct; during IME composition the event
+        // passes through untouched. If the responder isn't the field editor
+        // the event falls through and Return-submit semantics apply.
+        if event.keyCode == 36 || event.keyCode == 76, // Return / keypad Enter
+           event.modifierFlags.contains(.shift),
+           event.modifierFlags.intersection([.command, .control, .option]).isEmpty,
+           !resumePickerModel.isActive,
+           !fieldHasMarkedText(),
+           let editor = window.firstResponder as? NSTextView
+        {
+            editor.insertText("\n", replacementRange: editor.selectedRange())
+            return true
+        }
+
         if resumePickerModel.isActive {
             guard
                 event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty,
