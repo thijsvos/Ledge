@@ -9,6 +9,7 @@ struct NotchRootView: View {
     var island: IslandController
     var layout: IslandLayout
     var reduceMotion: Bool
+    var suggestionModel: SlashSuggestionModel
     var onHoverChanged: (Bool) -> Void
     var onTap: () -> Void
     var onSubmit: (String) -> Void
@@ -22,6 +23,7 @@ struct NotchRootView: View {
             state: island.state,
             layout: layout,
             reduceMotion: reduceMotion,
+            suggestionModel: suggestionModel,
             onHoverChanged: onHoverChanged,
             onIslandTap: onTap,
             onSubmit: onSubmit,
@@ -59,6 +61,13 @@ final class NotchWindowController: NSObject {
     private var globalMouseMonitor: Any?
     private var localKeyMonitor: Any?
 
+    /// Slash-command typeahead (user-requested addition beyond the MVP spec):
+    /// the model the capture field binds to and the local key monitor drives.
+    /// Its catalog is refreshed by `scanSlashCommands()` once per transition
+    /// into `.open` — event-driven, zero polling/timers/watchers (§10).
+    private let suggestionModel = SlashSuggestionModel()
+    private var suggestionScanTask: Task<Void, Never>?
+
     override init() {
         let island = IslandController()
         self.island = island
@@ -77,6 +86,7 @@ final class NotchWindowController: NSObject {
                 island: island,
                 layout: layout,
                 reduceMotion: false,
+                suggestionModel: suggestionModel,
                 onHoverChanged: { _ in },
                 onTap: {},
                 onSubmit: { _ in },
@@ -90,9 +100,24 @@ final class NotchWindowController: NSObject {
 
         // A `/` submission rejected before it ever ran hands the prompt back
         // so the field restores it on the next open — the raw input for an
-        // agent route is "/" + prompt (§5 router). Typed text is never lost.
+        // agent route is "/" + prompt (§5 router), except when the submit
+        // path already restored the slash for a known command (the prompt
+        // then IS the raw input; never double the slash). Typed text is
+        // never lost.
         agentRunController.onSubmissionRejected = { [weak self] prompt in
-            self?.captureCoordinator.preserveInput("/" + prompt)
+            self?.captureCoordinator.preserveInput(
+                prompt.hasPrefix("/") ? prompt : "/" + prompt
+            )
+        }
+
+        // Submit-time slash restoration: CaptureRouter strips the leading
+        // "/" (§5), but headless claude dispatches a custom command or skill
+        // only when the prompt itself starts with "/". The coordinator
+        // consults the CURRENT catalog (rescanned per open) so a completed —
+        // or fully typed — known command actually invokes the command;
+        // freeform `/` prompts flow to the runner unchanged.
+        captureCoordinator.slashCommandCatalog = { [suggestionModel] in
+            suggestionModel.catalog
         }
 
         hostingView.frame = CGRect(origin: .zero, size: geometry.windowFrame.size)
@@ -116,6 +141,8 @@ final class NotchWindowController: NSObject {
         agentRunController.shutdown()
         hoverTask?.cancel()
         hoverTask = nil
+        suggestionScanTask?.cancel()
+        suggestionScanTask = nil
         if let localMouseMonitor {
             NSEvent.removeMonitor(localMouseMonitor)
             self.localMouseMonitor = nil
@@ -201,6 +228,7 @@ final class NotchWindowController: NSObject {
             island: island,
             layout: layout,
             reduceMotion: reduceMotion,
+            suggestionModel: suggestionModel,
             onHoverChanged: { [weak self] hovering in self?.hoverChanged(hovering) },
             onTap: { [weak self] in self?.islandTapped() },
             onSubmit: { [weak self] input in self?.captureCoordinator.submit(input) },
@@ -243,7 +271,13 @@ final class NotchWindowController: NSObject {
             openSettingsFromPeek()
             return
         }
+        // Scan only on the actual transition INTO .open — a tap while
+        // already open must not rescan.
+        let wasAlreadyOpen = island.state == .open
         island.transition(to: .open)
+        if !wasAlreadyOpen {
+            scanSlashCommands()
+        }
     }
 
     /// §7 global hotkey (default ⌥Space, recorded in Settings): toggle — if
@@ -258,6 +292,7 @@ final class NotchWindowController: NSObject {
             dismissToIdle()
         } else {
             island.transition(to: .open)
+            scanSlashCommands()
         }
     }
 
@@ -280,6 +315,14 @@ final class NotchWindowController: NSObject {
     /// `.running` == collapsed + dot). Mirrors `IslandController`'s peek
     /// expiry fallback (`.running(liveRun)` if set, else `.collapsed`).
     private func dismissToIdle() {
+        // The typeahead model must never carry a dead query across opens:
+        // the next transition into .open computes the open shape — and the
+        // monitors' hit-test / key routing — from this model BEFORE
+        // CaptureView.onAppear resets the field, so stale "/…" text would
+        // briefly target a stale-grown shape and rubber-band back.
+        // Discarding here matches the documented dismissal behavior (typed
+        // text is discarded; onAppear still restores failed-capture input).
+        suggestionModel.text = ""
         if let run = island.liveRun {
             island.transition(to: .running(run))
         } else {
@@ -289,15 +332,14 @@ final class NotchWindowController: NSObject {
 
     /// Esc + click-outside monitors (§4), removed in `teardown()`.
     private func installMonitors() {
-        // Esc dismisses while open; swallowed so it doesn't leak elsewhere.
-        // (Local monitors run synchronously on the main thread.)
+        // The ONE local key monitor: Esc dismissal (Phase 1, unchanged) plus
+        // the slash-suggestion keys (↓ ↑ Tab Enter) while a list is visible.
+        // Handled keys are swallowed so they don't leak elsewhere. (Local
+        // monitors run synchronously on the main thread.)
         localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             let swallow = MainActor.assumeIsolated { () -> Bool in
-                guard let self, event.keyCode == 53, self.island.state == .open else {
-                    return false
-                }
-                self.dismissToIdle()
-                return true
+                guard let self else { return false }
+                return self.handleLocalKeyDown(event)
             }
             return swallow ? nil : event
         }
@@ -325,6 +367,75 @@ final class NotchWindowController: NSObject {
         }
     }
 
+    /// Returns true when the event was handled (the monitor then swallows
+    /// it). Esc behavior is UNCHANGED from Phase 1 (§4: collapse). The
+    /// typeahead keys act only while the island is open AND a suggestion
+    /// list is visible; with no visible list every key keeps its default
+    /// TextField behavior.
+    ///
+    /// Keyboard interaction (documented contract):
+    /// * ↓ / ↑ — move the selection; WRAPS at both ends. The highlight
+    ///           renders only once a selection was made — a highlighted row
+    ///           always means "Enter runs this".
+    /// * Tab   — completes the selected name into the field as "/name "
+    ///           (trailing space, caret at end); never submits.
+    /// * Enter — if the user actively moved the selection (the visibly
+    ///           highlighted row): complete, then submit "/name " through
+    ///           the normal submit path (field cleared → CaptureCoordinator).
+    ///           Otherwise the event passes to the TextField and the raw
+    ///           text submits as before this feature — never a match the
+    ///           user didn't visibly choose.
+    /// * Esc   — dismiss (Phase 1, untouched).
+    /// Modified keys (⌘⌃⌥⇧) are never intercepted, and while the field's
+    /// input context holds marked text (an IME composition — e.g. CJK), the
+    /// list keys are never intercepted either: ↓/↑/Return then belong to the
+    /// input method's candidate window and composition commit.
+    private func handleLocalKeyDown(_ event: NSEvent) -> Bool {
+        guard island.state == .open else { return false }
+
+        if event.keyCode == 53 { // Esc
+            dismissToIdle()
+            return true
+        }
+
+        guard suggestionModel.isListVisible,
+              event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty,
+              !fieldHasMarkedText()
+        else { return false }
+
+        switch event.keyCode {
+        case 125: // ↓
+            suggestionModel.moveSelection(by: 1)
+            return true
+        case 126: // ↑
+            suggestionModel.moveSelection(by: -1)
+            return true
+        case 48: // Tab
+            suggestionModel.completeSelection()
+            return true
+        case 36, 76: // Return / keypad Enter
+            guard suggestionModel.shouldCompleteOnReturn,
+                  let command = suggestionModel.selectedCommand
+            else { return false }
+            let input = suggestionModel.completionText(for: command)
+            // Mirrors CaptureView.submit exactly: clear the field, hand the
+            // raw input to the coordinator (the normal submit path).
+            suggestionModel.text = ""
+            captureCoordinator.submit(input)
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// True while the capture field's input context is composing marked text
+    /// (an input method's inline composition). The typeahead must then keep
+    /// its hands off ↓/↑/Return — they steer the IME's candidate window and
+    /// commit the composition, not the list.
+    private func fieldHasMarkedText() -> Bool {
+        NSTextInputContext.current?.client.hasMarkedText() == true
+    }
+
     private func handleLocalMouseDown(_ event: NSEvent) {
         guard island.state == .open else { return }
         guard event.window === window else {
@@ -332,8 +443,13 @@ final class NotchWindowController: NSObject {
             return
         }
         // Same numbers IslandView draws with: shape is top-centered in the
-        // constant window frame.
-        let size = IslandView.shapeSize(for: island.state, layout: layout)
+        // constant window frame (including the suggestion-list growth, so a
+        // click on a row is never mistaken for click-outside).
+        let size = IslandView.shapeSize(
+            for: island.state,
+            layout: layout,
+            openSuggestionRows: suggestionModel.visibleRowCount
+        )
         let shapeRect = CGRect(
             x: (window.frame.width - size.width) / 2,
             y: window.frame.height - size.height,
@@ -359,6 +475,47 @@ final class NotchWindowController: NSObject {
                 observeIslandState()
             }
         }
+    }
+
+    // MARK: - Slash-command scan (one per transition into .open)
+
+    /// Fires a catalog scan for one transition into `.open`. Called directly
+    /// from the two (and only) call sites that request `.open` — tap and
+    /// hotkey — NOT from the coalesced observation callback: observation
+    /// re-arms asynchronously, so a rapid close→reopen can collapse into a
+    /// single onChange and lose the open edge entirely, leaving that open
+    /// showing a stale catalog. Event-driven (§10: zero polling, no FSEvents
+    /// watchers; the list a given open shows is the filesystem as of that
+    /// open).
+    private func scanSlashCommands() {
+        // Vault root from the current "vaultPath" default; nil vault →
+        // user-level commands only.
+        let vaultRoot: URL? = {
+            guard let path = UserDefaults.standard.string(forKey: DefaultsKey.vaultPath),
+                  !path.isEmpty
+            else { return nil }
+            return URL(
+                fileURLWithPath: (path as NSString).expandingTildeInPath,
+                isDirectory: true
+            )
+        }()
+        let userHome = FileManager.default.homeDirectoryForCurrentUser
+
+        // Off the main actor: typical cost is milliseconds, but a giant
+        // ~/.claude must never jank the open animation. §2: the scan reads
+        // ONLY .claude/commands and .claude/skills under each base.
+        suggestionScanTask?.cancel()
+        suggestionScanTask = Task.detached(priority: .userInitiated) { [weak self] in
+            let commands = SlashCommandCatalog.scan(vaultRoot: vaultRoot, userHome: userHome)
+            guard !Task.isCancelled else { return } // a newer open superseded us
+            await self?.applyScannedSlashCommands(commands)
+        }
+    }
+
+    /// Back on the main actor: the model swaps in the fresh catalog and the
+    /// visible list (if the user is already typing a `/token`) updates.
+    private func applyScannedSlashCommands(_ commands: [SlashCommand]) {
+        suggestionModel.catalog = SlashCommandCatalog(commands: commands)
     }
 
     private func applyWindowSideEffects() {

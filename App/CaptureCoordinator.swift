@@ -7,7 +7,11 @@ import os
 /// CaptureView and the coordinator API stay untouched.
 @MainActor
 protocol AgentRunSubmitting: AnyObject {
-    /// `prompt` is everything after the leading `/` (untrimmed).
+    /// `prompt` is everything after the leading `/` (untrimmed) — except
+    /// that a prompt whose first token names a known slash command keeps its
+    /// leading `/` (see `SlashCommandCatalog.restoringCommandSlash`), so the
+    /// headless child dispatches the command instead of reading its name as
+    /// prose.
     func submitAgentRun(prompt: String)
 }
 
@@ -30,6 +34,13 @@ final class CaptureCoordinator {
     /// Nil until Phase 3 plugs ClaudeRunner in; `/` inputs then peek an info
     /// banner instead of running.
     weak var agentRunner: (any AgentRunSubmitting)?
+    /// The CURRENT slash-command catalog (owned by the window controller,
+    /// rescanned once per island open). Consulted at submit time to restore
+    /// the leading "/" on agent prompts whose first token names a known
+    /// command — headless claude only dispatches "/name …" prompts. The
+    /// default empty catalog restores nothing (MVP behavior, and what
+    /// LedgeCore-less tests get).
+    var slashCommandCatalog: () -> SlashCommandCatalog = { SlashCommandCatalog() }
     /// The raw input of the last FAILED instant capture. Typed text must
     /// never be lost to a failure peek (leaving `.open` destroys CaptureView
     /// and its field state), so the view restores this the next time the
@@ -59,7 +70,13 @@ final class CaptureCoordinator {
         switch CaptureRouter.route(input) {
         case let .agent(prompt):
             if let agentRunner {
-                agentRunner.submitAgentRun(prompt: prompt)
+                // §5 hands the runner everything AFTER the "/", but a prompt
+                // naming a known custom command/skill must reach claude WITH
+                // the slash or the child reads it as prose (prompt content
+                // is not part of the pinned §2.3 argv shape).
+                agentRunner.submitAgentRun(
+                    prompt: slashCommandCatalog().restoringCommandSlash(prompt)
+                )
             } else {
                 island.transition(to: .peek(.info(message: "Agent runs arrive in Phase 3")))
             }

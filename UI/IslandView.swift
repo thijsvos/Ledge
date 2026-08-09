@@ -76,6 +76,11 @@ struct IslandView: View {
     /// ImageRenderer cannot rasterize AppKit-backed controls (TextField);
     /// --render-preview sets this to draw a static stand-in instead.
     var staticRendering: Bool
+    /// The slash-command typeahead model (owned by the window controller).
+    /// Nil — the default, and what --render-preview's bare `IslandView(state:)`
+    /// gets — means no suggestions ever: the open shape stays its Phase-1
+    /// 120 pt and CaptureView falls back to an inert model.
+    var suggestionModel: SlashSuggestionModel?
 
     @State private var statusDotDimmed = false
 
@@ -83,6 +88,7 @@ struct IslandView: View {
         state: IslandState,
         layout: IslandLayout = .default,
         reduceMotion: Bool = false,
+        suggestionModel: SlashSuggestionModel? = nil,
         onHoverChanged: @escaping (Bool) -> Void = { _ in },
         onIslandTap: @escaping () -> Void = {},
         onSubmit: @escaping (String) -> Void = { _ in },
@@ -95,6 +101,7 @@ struct IslandView: View {
         self.state = state
         self.layout = layout
         self.reduceMotion = reduceMotion
+        self.suggestionModel = suggestionModel
         self.onHoverChanged = onHoverChanged
         self.onIslandTap = onIslandTap
         self.onSubmit = onSubmit
@@ -107,7 +114,19 @@ struct IslandView: View {
 
     /// The black shape's size for a state. Static so the window controller can
     /// hit-test click-outside against the same numbers.
-    static func shapeSize(for state: IslandState, layout: IslandLayout) -> CGSize {
+    ///
+    /// `openSuggestionRows` (only meaningful for `.open`) is how many
+    /// suggestion rows the list shows (≤ `SlashSuggestionModel.maxVisibleRows`
+    /// = 4): the 120 pt base grows by one 22 pt row height each, capped at
+    /// the constant 200 pt window height — 0 → 120, 1 → 142, 2 → 164,
+    /// 3 → 186, 4 → 200 (capped from 208). The 4-row cap is the CONTENT
+    /// budget: CaptureView's chrome above the list (notch clearance + field
+    /// row + hint + stack gaps) plus 5 fixed-height rows would need ≥ 205 pt
+    /// inside the 200 pt window and clip the bottom row — see
+    /// `SlashSuggestionModel.maxVisibleRows`.
+    static func shapeSize(
+        for state: IslandState, layout: IslandLayout, openSuggestionRows: Int = 0
+    ) -> CGSize {
         switch state {
         case .collapsed, .running:
             return layout.islandSize
@@ -115,7 +134,11 @@ struct IslandView: View {
             // "Grown ~10 pt": 10 pt per side horizontally, 10 pt down.
             return CGSize(width: layout.islandSize.width + 20, height: layout.islandSize.height + 10)
         case .open:
-            return CGSize(width: layout.windowSize.width, height: 120)
+            let rows = CGFloat(min(max(openSuggestionRows, 0), SlashSuggestionModel.maxVisibleRows))
+            return CGSize(
+                width: layout.windowSize.width,
+                height: min(120 + rows * SlashSuggestionList.rowHeight, layout.windowSize.height)
+            )
         case let .peek(content):
             // Failure peeks grow with their message (§6: headline + up to 3
             // stderr-tail lines) and carry a button row when resumable (§6
@@ -138,8 +161,15 @@ struct IslandView: View {
         }
     }
 
+    /// Reading `visibleRowCount` in body makes SwiftUI re-render (and the
+    /// shape re-size) as typing changes the match list.
+    private var openSuggestionRows: Int {
+        guard state == .open, !staticRendering, let suggestionModel else { return 0 }
+        return suggestionModel.visibleRowCount
+    }
+
     private var shapeSize: CGSize {
-        Self.shapeSize(for: state, layout: layout)
+        Self.shapeSize(for: state, layout: layout, openSuggestionRows: openSuggestionRows)
     }
 
     private var bottomRadius: CGFloat {
@@ -164,6 +194,9 @@ struct IslandView: View {
             .onHover(perform: onHoverChanged)
             .onTapGesture(perform: onIslandTap)
             .animation(IslandMotion.animation(reduceMotion: reduceMotion), value: state)
+            // The open shape growing/shrinking with the suggestion list uses
+            // the same one spring (or reduced-motion fade) as state changes.
+            .animation(IslandMotion.animation(reduceMotion: reduceMotion), value: openSuggestionRows)
             .frame(
                 width: layout.windowSize.width,
                 height: layout.windowSize.height,
@@ -189,7 +222,8 @@ struct IslandView: View {
                 topClearance: layout.islandSize.height + 8, // clear of the physical notch
                 staticRendering: staticRendering,
                 onSubmit: onSubmit,
-                restoreInput: captureRestoreInput
+                restoreInput: captureRestoreInput,
+                suggestionModel: suggestionModel
             )
         case .running:
             // Animated status dot at the notch edge (only animates while a
