@@ -40,6 +40,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// LSUIElement fallback entry point: with no Dock icon, and the status
+    /// item potentially squeezed out of a crowded menu bar (notched Macs hide
+    /// items that don't fit), launching the app again (`open -a Ledge`,
+    /// Finder double-click, Spotlight) must still reach Settings.
+    func applicationShouldHandleReopen(_: NSApplication, hasVisibleWindows _: Bool) -> Bool {
+        settingsWindowController?.show()
+        return false
+    }
+
     func applicationWillTerminate(_: Notification) {
         notchWindowController?.teardown()
         notchWindowController = nil
