@@ -43,8 +43,12 @@ final class NotchWindowController: NSObject {
 
     /// Opens the Settings window; wired by AppDelegate. Fired by tapping a
     /// configuration-failure peek (or its "Open Settings…" button) — §7
-    /// empty/error-states pass.
+    /// empty/error-states pass — and by the `/settings` native command.
     var onOpenSettings: (() -> Void)?
+
+    /// Presents the onboarding checks sheet; wired by AppDelegate. Fired by
+    /// the `/checks` native command.
+    var onRunChecks: (() -> Void)?
 
     private let agentRunController: AgentRunController
     private let captureCoordinator: CaptureCoordinator
@@ -63,9 +67,16 @@ final class NotchWindowController: NSObject {
 
     /// Slash-command typeahead (user-requested addition beyond the MVP spec):
     /// the model the capture field binds to and the local key monitor drives.
-    /// Its catalog is refreshed by `scanSlashCommands()` once per transition
-    /// into `.open` — event-driven, zero polling/timers/watchers (§10).
+    /// Its suggestion source is the STATIC native-command list (LedgeCore's
+    /// `NativeCommand`) — nothing to scan for the UI.
     private let suggestionModel = SlashSuggestionModel()
+    /// The user's Claude Code commands/skills, rescanned by
+    /// `scanSlashCommands()` once per transition into `.open` — event-driven,
+    /// zero polling/timers/watchers (§10). NOT shown in the suggestion list
+    /// (that lists Ledge's native commands); kept solely for
+    /// CaptureCoordinator's submit-time slash restoration, so a typed Claude
+    /// command ("/vet …") still reaches the CLI as a command, invisibly.
+    private var scannedCatalog = SlashCommandCatalog()
     private var suggestionScanTask: Task<Void, Never>?
 
     override init() {
@@ -113,12 +124,28 @@ final class NotchWindowController: NSObject {
         // Submit-time slash restoration: CaptureRouter strips the leading
         // "/" (§5), but headless claude dispatches a custom command or skill
         // only when the prompt itself starts with "/". The coordinator
-        // consults the CURRENT catalog (rescanned per open) so a completed —
-        // or fully typed — known command actually invokes the command;
-        // freeform `/` prompts flow to the runner unchanged.
-        captureCoordinator.slashCommandCatalog = { [suggestionModel] in
-            suggestionModel.catalog
+        // consults the CURRENT catalog (rescanned per open) so a fully typed
+        // known Claude command actually invokes the command; freeform `/`
+        // prompts flow to the runner unchanged. This is the ONLY consumer of
+        // the scan now — the suggestion UI lists Ledge's native commands.
+        captureCoordinator.slashCommandCatalog = { [weak self] in
+            self?.scannedCatalog ?? SlashCommandCatalog()
         }
+
+        // Behaviors for Ledge's native commands (the coordinator decides
+        // WHICH fires — LedgeCore's SubmitAction — these are the HOW).
+        captureCoordinator.nativeActions = NativeCommandActions(
+            openSettings: { [weak self] in self?.openSettingsFromPeek() },
+            runChecks: { [weak self] in self?.runChecksFromCommand() },
+            revealVault: { [weak self] in self?.revealVaultFromCommand() },
+            resumeLastSession: { [weak self] in
+                self?.agentRunController.resumeLastSessionInTerminal()
+            },
+            cancelRuns: { [weak self] in self?.agentRunController.cancelAllRuns() },
+            // The existing shutdown path (applicationWillTerminate →
+            // teardown) SIGTERMs any live child.
+            quit: { NSApp.terminate(nil) }
+        )
 
         hostingView.frame = CGRect(origin: .zero, size: geometry.windowFrame.size)
         window.contentView = hostingView
@@ -303,10 +330,51 @@ final class NotchWindowController: NSObject {
     }
 
     /// Configuration-failure peeks guide the user to Settings; the peek is
-    /// dismissed so it doesn't linger behind the Settings window.
+    /// dismissed so it doesn't linger behind the Settings window. Also the
+    /// `/settings` native command (the island collapses first there too).
     private func openSettingsFromPeek() {
         dismissToIdle()
         onOpenSettings?()
+    }
+
+    /// `/checks`: collapse the island, then the existing showOnboarding path
+    /// (the sheet lives on the Settings window, never on the notch panel).
+    private func runChecksFromCommand() {
+        dismissToIdle()
+        onRunChecks?()
+    }
+
+    /// `/vault`: reveal the vault in Finder when the configured path is a
+    /// valid vault; otherwise the same configuration-failure peek the rest of
+    /// the app uses (tap → Settings). Validation reuses `Vault`'s init — the
+    /// exact rules captures and runs enforce.
+    private func revealVaultFromCommand() {
+        guard
+            let path = UserDefaults.standard.string(forKey: DefaultsKey.vaultPath),
+            !path.isEmpty
+        else {
+            island.transition(to: .peek(.failure(
+                message: "No vault set — open Settings…",
+                resume: nil,
+                configuration: true
+            )))
+            return
+        }
+        let root = URL(
+            fileURLWithPath: (path as NSString).expandingTildeInPath,
+            isDirectory: true
+        )
+        do {
+            let vault = try Vault(root: root)
+            dismissToIdle()
+            NSWorkspace.shared.activateFileViewerSelecting([vault.root])
+        } catch {
+            island.transition(to: .peek(.failure(
+                message: (error as? VaultError)?.errorDescription ?? "Vault path is invalid",
+                resume: nil,
+                configuration: true
+            )))
+        }
     }
 
     /// Dismissing the open island returns it to idle, which is NOT always
@@ -379,12 +447,14 @@ final class NotchWindowController: NSObject {
     ///           always means "Enter runs this".
     /// * Tab   — completes the selected name into the field as "/name "
     ///           (trailing space, caret at end); never submits.
-    /// * Enter — if the user actively moved the selection (the visibly
-    ///           highlighted row): complete, then submit "/name " through
-    ///           the normal submit path (field cleared → CaptureCoordinator).
+    /// * Enter — if the user actively moved the selection, or a REAL query
+    ///           (non-empty token) has exactly one match (both render the
+    ///           highlight — `shouldCompleteOnReturn`): complete, then
+    ///           submit "/name " through the normal submit path (field
+    ///           cleared → CaptureCoordinator), which executes it natively.
     ///           Otherwise the event passes to the TextField and the raw
-    ///           text submits as before this feature — never a match the
-    ///           user didn't visibly choose.
+    ///           text submits as before — never a row that isn't visibly
+    ///           highlighted. The bare "/" never auto-runs anything.
     /// * Esc   — dismiss (Phase 1, untouched).
     /// Modified keys (⌘⌃⌥⇧) are never intercepted, and while the field's
     /// input context holds marked text (an IME composition — e.g. CJK), the
@@ -479,14 +549,18 @@ final class NotchWindowController: NSObject {
 
     // MARK: - Slash-command scan (one per transition into .open)
 
-    /// Fires a catalog scan for one transition into `.open`. Called directly
-    /// from the two (and only) call sites that request `.open` — tap and
-    /// hotkey — NOT from the coalesced observation callback: observation
-    /// re-arms asynchronously, so a rapid close→reopen can collapse into a
-    /// single onChange and lose the open edge entirely, leaving that open
-    /// showing a stale catalog. Event-driven (§10: zero polling, no FSEvents
-    /// watchers; the list a given open shows is the filesystem as of that
-    /// open).
+    /// Fires a catalog scan for one transition into `.open`. The scan result
+    /// no longer feeds the suggestion UI (the list shows Ledge's native
+    /// commands) — it exists so submit-time slash restoration keeps working
+    /// invisibly: a typed Claude command's prompt must reach the CLI with its
+    /// leading "/" restored, or the child reads the name as prose. Called
+    /// directly from the two (and only) call sites that request `.open` —
+    /// tap and hotkey — NOT from the coalesced observation callback:
+    /// observation re-arms asynchronously, so a rapid close→reopen can
+    /// collapse into a single onChange and lose the open edge entirely,
+    /// leaving that open holding a stale catalog. Event-driven (§10: zero
+    /// polling, no FSEvents watchers; the catalog a given open consults is
+    /// the filesystem as of that open).
     private func scanSlashCommands() {
         // Vault root from the current "vaultPath" default; nil vault →
         // user-level commands only.
@@ -512,10 +586,11 @@ final class NotchWindowController: NSObject {
         }
     }
 
-    /// Back on the main actor: the model swaps in the fresh catalog and the
-    /// visible list (if the user is already typing a `/token`) updates.
+    /// Back on the main actor: swap in the fresh catalog for submit-time
+    /// slash restoration (nothing visible changes — the suggestion list is
+    /// sourced from the static native-command list).
     private func applyScannedSlashCommands(_ commands: [SlashCommand]) {
-        suggestionModel.catalog = SlashCommandCatalog(commands: commands)
+        scannedCatalog = SlashCommandCatalog(commands: commands)
     }
 
     private func applyWindowSideEffects() {

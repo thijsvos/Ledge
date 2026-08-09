@@ -223,6 +223,144 @@ final class AgentRunController: AgentRunSubmitting {
         pasteboard.setString(line, forType: .string)
     }
 
+    // MARK: - Native commands (/resume, /cancel)
+
+    /// The `/resume` native command: opens Terminal resuming the last stored
+    /// session for the current vault, via the exact §6 escape-hatch machinery
+    /// (`openInTerminal`). The stored ID passes the same `ResumePolicy` guard
+    /// as "continue last" — but `enabled` is hardwired true: typing /resume
+    /// IS the explicit ask, independent of the Settings toggle. An invalid
+    /// stored ID is cleared (never considered again) and reads as "none".
+    /// No vault or no valid session → failure peek; success → the island
+    /// dismisses to idle (Terminal activates, not Ledge).
+    func resumeLastSessionInTerminal() {
+        // §2.4 discipline (spirit): /resume must not put a second `claude` to
+        // work in the vault while a headless run is live, queued, or still in
+        // its pre-enqueue pipeline (`island.liveRun` is set synchronously on
+        // Enter, before the runner bookkeeping catches up) — the Terminal
+        // process would edit the same vault the child is editing, possibly
+        // resuming the very session the live run holds.
+        guard liveHandle == nil, queueDepth == 0, island.liveRun == nil else {
+            island.transition(to: .peek(.info(message: "Run in progress — /cancel first")))
+            return
+        }
+        guard
+            let configuredPath = defaults.string(forKey: DefaultsKey.vaultPath),
+            !configuredPath.isEmpty
+        else {
+            island.transition(to: .peek(.failure(message: "No session to resume", resume: nil)))
+            return
+        }
+        let vaultPath = (configuredPath as NSString).expandingTildeInPath
+        let sessionKey = DefaultsKey.lastSessionID(vaultPath: vaultPath)
+        let choice = ResumePolicy.pickResumeSessionID(
+            enabled: true,
+            stored: defaults.string(forKey: sessionKey)
+        )
+        if choice.shouldClearStored {
+            logger.error("stored session ID invalid — clearing \(sessionKey, privacy: .public)")
+            defaults.removeObject(forKey: sessionKey)
+        }
+        guard let sessionID = choice.sessionID else {
+            island.transition(to: .peek(.failure(message: "No session to resume", resume: nil)))
+            return
+        }
+        // Dismiss BEFORE opening: openInTerminal's write-failure peek routes
+        // through showPeek, which is dropped while the island is `.open`.
+        dismissToIdle()
+        openInTerminal(ResumeAction(vaultPath: vaultPath, sessionID: sessionID))
+    }
+
+    /// The `/cancel` native command: terminate the live child and drop the
+    /// whole queue. Reuses the retirement machinery verbatim — a full-stop
+    /// retire of the current runner (terminateAll SIGTERMs, escalates to
+    /// SIGKILL, returns once the child is dead); the next submit lazily
+    /// creates a fresh runner, and its enqueue awaits `retirementDrain`
+    /// first, so a /submit racing /cancel can never spawn while the
+    /// cancelled child still lives (§2.4 one-run-per-vault, same discipline
+    /// as a vault/binary change). Unlike retirement, the dropped queued
+    /// prompts are NOT handed back — the user explicitly asked to cancel
+    /// them — and the "Cancelled" peek fires only once the child is dead.
+    ///
+    /// Two lag disciplines make /cancel honest under races:
+    /// - The no-op guard consults `island.liveRun` (set synchronously on
+    ///   Enter) as well as the runner bookkeeping, which lags by the whole
+    ///   async pipeline (binary resolution can take seconds) and by the event
+    ///   stream (queueChanged(0) precedes the next runStarted). A visible
+    ///   running dot therefore never coexists with a "No run to cancel" peek.
+    /// - The cancellation itself is a LINK ON THE SUBMISSION CHAIN: it runs
+    ///   only after every prior Enter's pipeline finished its enqueue, so a
+    ///   submission in its pre-enqueue window when /cancel arrives is
+    ///   enqueued first and then killed here — never silently raced (stale
+    ///   "Ledge is quitting" rejections, post-cancel "Queued #1" peeks, or a
+    ///   showRunning re-setting bookkeeping the cancel just cleared). A
+    ///   submission entered AFTER /cancel chains behind it and spawns on a
+    ///   fresh runner once the cancelled child is dead.
+    func cancelAllRuns() {
+        guard liveHandle != nil || queueDepth > 0 || island.liveRun != nil else {
+            island.transition(to: .peek(.info(message: "No run to cancel")))
+            return
+        }
+        logger.info("/cancel — terminating live run and dropping the queue")
+        // Enter leaves `.open` synchronously (§5): drop the dot and collapse
+        // now; the chained cancellation confirms once the child is dead.
+        island.clearLiveRun()
+        dismissToIdle()
+        let previousSubmission = submissionChain
+        submissionChain = Task { [weak self] in
+            await previousSubmission?.value
+            self?.performCancellation()
+        }
+    }
+
+    /// The chained /cancel body (main actor, after all prior submission
+    /// pipelines enqueued): retire the current runner through the exact
+    /// retirement machinery. A nil runner means the pipeline this /cancel
+    /// chained behind never spawned anything (it was rejected — its failure
+    /// peek already explains why), so there is nothing to kill and no peek
+    /// to show.
+    private func performCancellation() {
+        guard let previous = runner else { return }
+        eventsTask?.cancel()
+        eventsTask = nil
+        island.clearLiveRun()
+        liveHandle = nil
+        queueDepth = 0
+        runner = nil
+        runnerVaultPath = nil
+        runnerBinaryPath = nil
+        runnerModel = nil
+        runnerEffort = nil
+        retiredRunners.append(previous)
+        let previousDrain = retirementDrain
+        retirementDrain = Task.detached { [weak self] in
+            await previousDrain?.value
+            // Returns once the child has exited; dropped prompts discarded
+            // deliberately (cancellation, not retirement).
+            _ = await previous.terminateAll()
+            await self?.finishCancellation(of: previous)
+        }
+    }
+
+    /// Cancellation epilogue (main actor, from the drain task): forget the
+    /// dead runner and confirm. showPeek's `.open` guard applies — if the
+    /// user reopened the field meanwhile, the banner is dropped, as with
+    /// every other runner-driven peek.
+    private func finishCancellation(of retired: ClaudeRunner) {
+        retiredRunners.removeAll { $0 === retired }
+        showPeek(.info(message: "Cancelled"))
+    }
+
+    /// Mirrors `NotchWindowController.dismissToIdle`: idle is
+    /// `.running(liveRun)` while an agent run is live, else `.collapsed`.
+    private func dismissToIdle() {
+        if let run = island.liveRun {
+            island.transition(to: .running(run))
+        } else {
+            island.transition(to: .collapsed)
+        }
+    }
+
     // MARK: - Quit
 
     /// App quit (§6): SIGTERM the live child. `terminateNow()` is nonisolated

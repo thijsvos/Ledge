@@ -2,10 +2,9 @@
 import XCTest
 
 /// SlashCommandCatalog: scan (namespacing, skills, frontmatter, dedupe,
-/// ordering, hidden/symlink/depth skips, missing dirs) and matching
-/// (case-insensitive prefix, empty prefix = all). All fixture trees are built
-/// in per-test temp directories — nothing committed, nothing under the real
-/// `~/.claude` is ever touched.
+/// ordering, hidden/symlink/depth skips, missing dirs) and submit-time slash
+/// restoration. All fixture trees are built in per-test temp directories —
+/// nothing committed, nothing under the real `~/.claude` is ever touched.
 final class SlashCommandCatalogTests: XCTestCase {
     private var root: URL!
     private var home: URL!
@@ -288,26 +287,6 @@ final class SlashCommandCatalogTests: XCTestCase {
         let commands = scan()
         XCTAssertEqual(commands.map(\.name), ["ship", "lint"])
         XCTAssertEqual(commands.map(\.source), [.projectCommand, .projectSkill])
-    }
-
-    // MARK: - matching(prefix:)
-
-    func testMatchingIsCaseInsensitiveAndPreservesOrder() throws {
-        try writeCommand(base: home, "Review.md")
-        try writeCommand(base: home, "release.md")
-        try writeCommand(base: home, "plan.md")
-        let catalog = SlashCommandCatalog(commands: scan())
-        XCTAssertEqual(catalog.matching(prefix: "re").map(\.name), ["release", "Review"])
-        XCTAssertEqual(catalog.matching(prefix: "REL").map(\.name), ["release"])
-        XCTAssertEqual(catalog.matching(prefix: "x"), [])
-    }
-
-    func testMatchingEmptyPrefixReturnsAll() {
-        let commands = [
-            SlashCommand(name: "a", source: .userCommand),
-            SlashCommand(name: "b", source: .userSkill),
-        ]
-        XCTAssertEqual(SlashCommandCatalog(commands: commands).matching(prefix: ""), commands)
     }
 
     // MARK: - restoringCommandSlash(_:)

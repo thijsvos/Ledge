@@ -20,9 +20,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let settings = SettingsWindowController()
         settingsWindowController = settings
 
-        // Configuration-failure peeks ("no vault", "no binary") open Settings.
+        // Configuration-failure peeks ("no vault", "no binary") and the
+        // /settings native command open Settings.
         notch.onOpenSettings = { [weak settings] in
             settings?.show()
+        }
+        // The /checks native command re-runs the onboarding checks sheet.
+        notch.onRunChecks = { [weak settings] in
+            settings?.showOnboarding()
         }
 
         statusItemController = StatusItemController(

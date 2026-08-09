@@ -15,11 +15,30 @@ protocol AgentRunSubmitting: AnyObject {
     func submitAgentRun(prompt: String)
 }
 
-/// Routes one submitted capture-field input (§5) and drives the island into
-/// the resulting peek. Instant captures are performed synchronously — the
-/// write is <5 ms in practice, well under the 50 ms budget — so the island
-/// collapses into its peek immediately on Enter and the field never blocks on
-/// I/O.
+/// The App layer's behavior table for Ledge's native slash commands
+/// (`NativeCommand`): the coordinator decides WHICH command fires (pure,
+/// LedgeCore-tested via `SubmitAction.decide`); these closures are HOW —
+/// wired by NotchWindowController where the Settings/onboarding/runner
+/// plumbing already lives. `/help` has no entry: its behavior is a plain
+/// info peek, which the coordinator owns like every other submit peek.
+@MainActor
+struct NativeCommandActions {
+    var openSettings: () -> Void = {}
+    var runChecks: () -> Void = {}
+    var revealVault: () -> Void = {}
+    var resumeLastSession: () -> Void = {}
+    var cancelRuns: () -> Void = {}
+    var quit: () -> Void = {}
+}
+
+/// Routes one submitted capture-field input and drives the island into the
+/// resulting peek. Precedence: an exact native command ("/name", trimmed —
+/// `NativeCommand.match`) executes inside Ledge BEFORE the §5 router ever
+/// sees the input (no capture written, no run spawned); everything else
+/// follows §5 literally via the untouched `CaptureRouter`. Instant captures
+/// are performed synchronously — the write is <5 ms in practice, well under
+/// the 50 ms budget — so the island collapses into its peek immediately on
+/// Enter and the field never blocks on I/O.
 ///
 /// The vault path comes from UserDefaults key "vaultPath" (standard defaults).
 /// The Settings UI arrives in Phase 4; Phase-2 QA sets the path via:
@@ -35,12 +54,17 @@ final class CaptureCoordinator {
     /// banner instead of running.
     weak var agentRunner: (any AgentRunSubmitting)?
     /// The CURRENT slash-command catalog (owned by the window controller,
-    /// rescanned once per island open). Consulted at submit time to restore
-    /// the leading "/" on agent prompts whose first token names a known
-    /// command — headless claude only dispatches "/name …" prompts. The
-    /// default empty catalog restores nothing (MVP behavior, and what
-    /// LedgeCore-less tests get).
+    /// rescanned once per island open). The catalog no longer feeds the
+    /// suggestion UI (the list shows Ledge's native commands), but it is
+    /// still consulted at submit time to restore the leading "/" on agent
+    /// prompts whose first token names a known Claude command — headless
+    /// claude only dispatches "/name …" prompts, so typed Claude commands
+    /// keep working invisibly. The default empty catalog restores nothing
+    /// (MVP behavior, and what LedgeCore-less tests get).
     var slashCommandCatalog: () -> SlashCommandCatalog = { SlashCommandCatalog() }
+    /// Behaviors for the native commands; injected by NotchWindowController.
+    /// The no-op defaults keep the coordinator constructible without wiring.
+    var nativeActions = NativeCommandActions()
     /// The raw input of the last FAILED instant capture. Typed text must
     /// never be lost to a failure peek (leaving `.open` destroys CaptureView
     /// and its field state), so the view restores this the next time the
@@ -65,9 +89,21 @@ final class CaptureCoordinator {
 
     /// Handles Enter in the capture field. Always transitions the island out
     /// of `.open` synchronously (into the resulting peek, or straight to idle
-    /// for an empty submit).
+    /// for an empty submit). Native commands leave `.open` through their
+    /// behavior (peek, dismiss-then-window, or app termination).
     func submit(_ input: String) {
-        switch CaptureRouter.route(input) {
+        switch SubmitAction.decide(input) {
+        case let .native(command):
+            execute(native: command)
+        case let .routed(route):
+            submit(route: route, rawInput: input)
+        }
+    }
+
+    /// The §5 routes, exactly as before native commands existed. `rawInput`
+    /// is the field text as typed — what a failed capture preserves.
+    private func submit(route: CaptureRoute, rawInput: String) {
+        switch route {
         case let .agent(prompt):
             if let agentRunner {
                 // §5 hands the runner everything AFTER the "/", but a prompt
@@ -89,8 +125,35 @@ final class CaptureCoordinator {
                 return
             }
             if !performInstantCapture(text, target: target) {
-                restoreInput = input
+                restoreInput = rawInput
             }
+        }
+    }
+
+    /// Executes a native command: no capture is written, no run spawned.
+    /// `/help` peeks its banner here (the suggestion LIST with per-command
+    /// summaries is the real help; the banner only fits one line); every
+    /// other command runs through the injected App-layer behavior, which owns
+    /// its own island follow-up (dismiss, peek, window, or termination).
+    private func execute(native command: NativeCommand) {
+        logger.info("native command /\(command.name, privacy: .public)")
+        switch command {
+        case .help:
+            island.transition(to: .peek(.info(
+                message: "text → daily · .i → inbox · /prompt → Claude agent · /command → Ledge"
+            )))
+        case .settings:
+            nativeActions.openSettings()
+        case .checks:
+            nativeActions.runChecks()
+        case .vault:
+            nativeActions.revealVault()
+        case .resume:
+            nativeActions.resumeLastSession()
+        case .cancel:
+            nativeActions.cancelRuns()
+        case .quit:
+            nativeActions.quit()
         }
     }
 

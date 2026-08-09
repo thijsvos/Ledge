@@ -1,18 +1,21 @@
 import LedgeCore
 import SwiftUI
 
-/// The suggestion rows under the capture field: up to
-/// `SlashSuggestionModel.maxVisibleRows` (4) visible, scrollable beyond.
-/// The model itself lives in LedgeCore (its tokenization/selection/Enter
-/// policy is unit-tested there); this file is only the rendering.
+/// The suggestion rows under the capture field: Ledge's own native commands
+/// (`NativeCommand`), up to `SlashSuggestionModel.maxVisibleRows` (4)
+/// visible, scrollable beyond. The model itself lives in LedgeCore (its
+/// tokenization/selection/Enter policy is unit-tested there); this file is
+/// only the rendering: /name primary, the one-line summary secondary, and a
+/// "ledge" capsule badge — native commands take no arguments, so there is no
+/// argument hint.
 ///
-/// The selection highlight renders ONLY after the user pressed ↓/↑ for the
-/// current text (`hasUserMovedSelection`) — the same condition under which
-/// Enter completes-then-submits, so a highlighted row always means "Enter
-/// runs this" and an un-highlighted list always means "Enter submits the raw
-/// text". Clicking a row completes the command into the field without
-/// submitting. Never rendered by --render-preview (CaptureView's static
-/// branch omits it entirely).
+/// The selection highlight renders under EXACTLY the model's
+/// `shouldCompleteOnReturn` condition (an actively chosen row, or a single
+/// unambiguous match for a real query) — so a highlighted row always means
+/// "Enter runs this" and an un-highlighted list always means "Enter submits
+/// the raw text". Clicking a row completes the command into the field
+/// without submitting. Never rendered by --render-preview (CaptureView's
+/// static branch omits it entirely).
 struct SlashSuggestionList: View {
     /// One row's fixed height; `IslandView.shapeSize` grows the open shape by
     /// this per visible row.
@@ -27,7 +30,7 @@ struct SlashSuggestionList: View {
                     ForEach(Array(model.matches.enumerated()), id: \.offset) { index, command in
                         row(
                             command,
-                            selected: model.hasUserMovedSelection && index == model.highlightIndex
+                            selected: model.shouldCompleteOnReturn && index == model.highlightIndex
                         )
                         .id(index)
                         .onTapGesture { model.complete(command) }
@@ -41,29 +44,20 @@ struct SlashSuggestionList: View {
         }
     }
 
-    private func row(_ command: SlashCommand, selected: Bool) -> some View {
+    private func row(_ command: NativeCommand, selected: Bool) -> some View {
         HStack(spacing: 6) {
             Text("/" + command.name)
                 .font(.system(size: 12, weight: .medium, design: .monospaced))
                 .foregroundStyle(.white)
                 .lineLimit(1)
                 .layoutPriority(2)
-            if let hint = command.argumentHint {
-                Text(hint)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.white.opacity(0.35)) // tertiary
-                    .lineLimit(1)
-                    .layoutPriority(1)
-            }
-            if let description = command.description {
-                Text(description)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.white.opacity(0.55)) // secondary
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            }
+            Text(command.summary)
+                .font(.system(size: 11))
+                .foregroundStyle(.white.opacity(0.55)) // secondary
+                .lineLimit(1)
+                .truncationMode(.tail)
             Spacer(minLength: 8)
-            sourceBadge(for: command.source)
+            badge
         }
         .padding(.horizontal, 8)
         .frame(height: Self.rowHeight)
@@ -76,21 +70,12 @@ struct SlashSuggestionList: View {
         .contentShape(Rectangle())
     }
 
-    private func sourceBadge(for source: SlashCommand.Source) -> some View {
-        Text(source.badgeLabel)
+    private var badge: some View {
+        Text("ledge")
             .font(.system(size: 9, weight: .medium, design: .monospaced))
             .foregroundStyle(.white.opacity(0.45))
             .padding(.horizontal, 5)
             .padding(.vertical, 1)
             .background(Capsule().fill(.white.opacity(0.08)))
-    }
-}
-
-private extension SlashCommand.Source {
-    var badgeLabel: String {
-        switch self {
-        case .projectCommand, .projectSkill: "vault"
-        case .userCommand, .userSkill: "user"
-        }
     }
 }

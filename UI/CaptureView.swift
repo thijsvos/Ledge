@@ -46,12 +46,20 @@ struct CaptureView: View {
     private static let placeholder = "Capture a thought…"
     private static let hint = "↩ save · / agent · .i inbox"
 
-    /// "daily" / "inbox" / "agent", straight from the router.
+    /// "daily" / "inbox" / "agent" / "ledge", from the model's
+    /// `submitActionOnReturn` — the SAME condition the key monitor and the
+    /// list highlight use, `SubmitAction.decide` included. Deriving the chip
+    /// from `decide(text)` alone would lie exactly when it matters most:
+    /// for "/q" decide says .agent("q") but Enter auto-completes the single
+    /// match and runs /quit (LedgeCore-tested seam, so the chip and Enter
+    /// can never diverge).
     private var targetLabel: String {
-        switch CaptureRouter.route(model.text) {
-        case .agent:
+        switch model.submitActionOnReturn {
+        case .native:
+            "ledge"
+        case .routed(.agent):
             "agent"
-        case let .instant(target, _):
+        case let .routed(.instant(target, _)):
             target == .inbox ? "inbox" : "daily"
         }
     }

@@ -25,11 +25,18 @@ public struct SlashCommand: Equatable, Sendable {
     /// file's path relative to `commands/` minus the `.md` extension, with
     /// path separators replaced by ":" (Claude Code namespacing, e.g.
     /// `foo/bar.md` → "foo:bar"). For skills it is the frontmatter `name:`
-    /// value, else the skill directory's name.
+    /// value, else the skill directory's name. This is the ONLY field the
+    /// current production consumer reads (`restoringCommandSlash`).
     public let name: String
-    /// Frontmatter `description:`, if present and non-empty.
+    /// Frontmatter `description:`, if present and non-empty. Currently
+    /// UNCONSUMED in production: the suggestion UI lists Ledge's native
+    /// commands, not the catalog. Kept (with `argumentHint`) because the
+    /// scan machinery is pinned unchanged by the phase decision — the fields
+    /// ride along with the frontmatter parse skills already need for `name:`
+    /// and would be re-consumed by any future catalog-surfacing UI.
     public let description: String?
-    /// Frontmatter `argument-hint:`, if present and non-empty.
+    /// Frontmatter `argument-hint:`, if present and non-empty. Currently
+    /// unconsumed in production — see `description`.
     public let argumentHint: String?
     public let source: Source
 
@@ -46,9 +53,10 @@ public struct SlashCommand: Equatable, Sendable {
     }
 }
 
-/// The scanned command list plus prefix filtering. `scan` does the I/O once
-/// (per island open, driven by the App layer); `matching` is pure and cheap
-/// enough to run per keystroke.
+/// The scanned command list. `scan` does the I/O once (per island open,
+/// driven by the App layer); `restoringCommandSlash` is the sole production
+/// consumer — the suggestion UI lists Ledge's native commands instead, so
+/// the old per-keystroke prefix filter is gone.
 public struct SlashCommandCatalog: Equatable, Sendable {
     /// Deduped and ordered: projectCommand, projectSkill, userCommand,
     /// userSkill; alphabetical within each group.
@@ -56,14 +64,6 @@ public struct SlashCommandCatalog: Equatable, Sendable {
 
     public init(commands: [SlashCommand] = []) {
         self.commands = commands
-    }
-
-    /// Case-insensitive name-prefix filter preserving catalog order. The
-    /// empty prefix matches everything.
-    public func matching(prefix: String) -> [SlashCommand] {
-        guard !prefix.isEmpty else { return commands }
-        let needle = prefix.lowercased()
-        return commands.filter { $0.name.lowercased().hasPrefix(needle) }
     }
 
     /// Submit-time slash restoration. The §5 router hands the runner

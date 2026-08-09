@@ -6,6 +6,13 @@
 // Observation-only (no SwiftUI): the same import set IslandController
 // already uses.
 //
+// SOURCE: the list shows LEDGE'S OWN native commands (`NativeCommand`, a
+// static list in declaration order) — NOT the user's Claude Code catalog.
+// The catalog scan still runs per open, but it feeds only the invisible
+// submit-time slash restoration (see NotchWindowController /
+// CaptureCoordinator): typed Claude commands keep working; they just aren't
+// suggested here.
+//
 // The App layer owns the single instance: NotchWindowController's LOCAL key
 // monitor drives selection and completion, CaptureView's TextField binds
 // `text`, and SlashSuggestionList renders `matches`. Deliberately NOT part
@@ -17,9 +24,8 @@ import Observation
 
 /// Typeahead state for the capture field's slash-command suggestions.
 ///
-/// The catalog is replaced after each scan (one scan per transition into
-/// `.open`, off the main actor — see the window controller). Everything else
-/// here is derived per keystroke from `text`; there is nothing to poll.
+/// The source is the static `NativeCommand` list; everything here is derived
+/// per keystroke from `text` — there is nothing to poll and nothing to scan.
 @MainActor
 @Observable
 public final class SlashSuggestionModel {
@@ -30,10 +36,6 @@ public final class SlashSuggestionModel {
     /// 4 × 22 pt rows are the most that fit without the bottom row clipping
     /// at the window edge (5 rows need ≥ 205 pt of un-compressible content).
     public static let maxVisibleRows = 4
-
-    /// The scanned commands; replaced by the window controller when a scan
-    /// lands. Starts empty, so the list simply doesn't show until then.
-    public var catalog = SlashCommandCatalog()
 
     /// The capture field's live text (single source of truth — CaptureView
     /// binds its TextField here so the key monitor can complete into the
@@ -47,13 +49,11 @@ public final class SlashSuggestionModel {
     }
 
     /// Keyboard selection into `matches`. Clamp on read (`highlightIndex`) —
-    /// matches can shrink under it while the user types.
+    /// defensive only now that the source is static, but harmless.
     public private(set) var selectedIndex = 0
-    /// True once the user pressed ↓/↑ for the current text. The selection
-    /// highlight renders ONLY while this is true, and Enter
-    /// completes-then-submits ONLY while this is true — the visible
-    /// highlight and the Enter behavior always agree (highlight shown ⇔
-    /// Enter runs that row).
+    /// True once the user pressed ↓/↑ for the current text. See
+    /// `shouldCompleteOnReturn` — an active selection always renders the
+    /// highlight and always makes Enter run that row.
     public private(set) var hasUserMovedSelection = false
 
     public init() {}
@@ -68,9 +68,11 @@ public final class SlashSuggestionModel {
         return String(token)
     }
 
-    public var matches: [SlashCommand] {
+    /// Native commands matching the typed token, in `NativeCommand`
+    /// declaration order (documented choice — NOT alphabetical).
+    public var matches: [NativeCommand] {
         guard let query else { return [] }
-        return catalog.matching(prefix: query)
+        return NativeCommand.matching(prefix: query)
     }
 
     public var isListVisible: Bool {
@@ -89,28 +91,47 @@ public final class SlashSuggestionModel {
         min(selectedIndex, max(matches.count - 1, 0))
     }
 
-    public var selectedCommand: SlashCommand? {
+    public var selectedCommand: NativeCommand? {
         let matches = matches
         guard !matches.isEmpty else { return nil }
         return matches[min(selectedIndex, matches.count - 1)]
     }
 
-    /// Enter completes-then-submits only when the user actively chose a row
-    /// with ↓/↑ — the same condition that renders the highlight, so what is
-    /// visibly selected is exactly what Enter runs. Otherwise Enter submits
-    /// the raw text exactly as before this feature.
+    /// Enter completes-then-submits when the user actively chose a row with
+    /// ↓/↑, OR when a REAL query (non-empty token) has exactly one match —
+    /// with a short static list, "/q" + Enter running /quit is unambiguous.
+    /// The bare "/" (empty query) NEVER auto-completes: it matches the whole
+    /// list, and "/" + Enter must never silently run a command.
     ///
-    /// Deliberately NO single-match auto-complete: with one command
-    /// installed, "/" + Enter must never silently launch it (the empty query
-    /// matches the whole catalog), and "/fix" + Enter must submit "fix" —
-    /// not a lone "fix-ci" match the user never typed.
+    /// `SlashSuggestionList` renders the highlight from this same condition,
+    /// so a highlighted row always means exactly "Enter runs this" and an
+    /// un-highlighted list always means "Enter submits the raw text".
     public var shouldCompleteOnReturn: Bool {
-        isListVisible && hasUserMovedSelection
+        guard isListVisible else { return false }
+        if hasUserMovedSelection {
+            return true
+        }
+        guard let query, !query.isEmpty else { return false }
+        return matches.count == 1
+    }
+
+    /// What Enter would do RIGHT NOW: the highlighted native row whenever
+    /// `shouldCompleteOnReturn` (the key monitor then completes "/name " and
+    /// submits it — see NotchWindowController), else whatever the raw text
+    /// routes to. The capture view's target chip MUST render from this, not
+    /// from `SubmitAction.decide(text)` alone — for "/q" decide says
+    /// .agent("q") while Enter actually runs /quit, and the chip must never
+    /// lie precisely when Enter is destructive.
+    public var submitActionOnReturn: SubmitAction {
+        if shouldCompleteOnReturn, let selectedCommand {
+            return .native(selectedCommand)
+        }
+        return SubmitAction.decide(text)
     }
 
     /// ↓ (+1) / ↑ (−1). The selection WRAPS at both ends (documented choice:
     /// ↓ from the last row returns to the first, ↑ from the first to the
-    /// last) — with long scrollable lists, wrapping beats pinning against an
+    /// last) — with scrollable lists, wrapping beats pinning against an
     /// invisible end.
     public func moveSelection(by delta: Int) {
         let count = matches.count
@@ -120,16 +141,16 @@ public final class SlashSuggestionModel {
         hasUserMovedSelection = true
     }
 
-    /// What completion puts in the field: "/name " — the trailing space both
-    /// lets arguments follow immediately and hides the list (a space after
-    /// the token ends the query). Replacing the whole field text puts the
-    /// caret at the end.
-    public func completionText(for command: SlashCommand) -> String {
+    /// What completion puts in the field: "/name " — the trailing space hides
+    /// the list (a space after the token ends the query), and submit-time
+    /// `NativeCommand.match` trims it, so the completed text still executes
+    /// natively. Replacing the whole field text puts the caret at the end.
+    public func completionText(for command: NativeCommand) -> String {
         "/" + command.name + " "
     }
 
     /// Tab and row clicks: complete into the field WITHOUT submitting.
-    public func complete(_ command: SlashCommand) {
+    public func complete(_ command: NativeCommand) {
         text = completionText(for: command)
     }
 
