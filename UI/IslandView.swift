@@ -81,6 +81,12 @@ struct IslandView: View {
     /// gets — means no suggestions ever: the open shape stays its Phase-1
     /// 120 pt and CaptureView falls back to an inert model.
     var suggestionModel: SlashSuggestionModel?
+    /// The /resume picker model (owned by the window controller). Nil — the
+    /// default, and what --render-preview gets — means picker mode never
+    /// renders; previews are unchanged.
+    var pickerModel: ResumePickerModel?
+    /// Picker row click → resume that session (App layer).
+    var onPickerSelect: (RunRecord) -> Void
 
     @State private var statusDotDimmed = false
 
@@ -89,6 +95,7 @@ struct IslandView: View {
         layout: IslandLayout = .default,
         reduceMotion: Bool = false,
         suggestionModel: SlashSuggestionModel? = nil,
+        pickerModel: ResumePickerModel? = nil,
         onHoverChanged: @escaping (Bool) -> Void = { _ in },
         onIslandTap: @escaping () -> Void = {},
         onSubmit: @escaping (String) -> Void = { _ in },
@@ -96,12 +103,14 @@ struct IslandView: View {
         onOpenInTerminal: @escaping (ResumeAction) -> Void = { _ in },
         onCopyCommand: @escaping (ResumeAction) -> Void = { _ in },
         onOpenSettings: @escaping () -> Void = {},
+        onPickerSelect: @escaping (RunRecord) -> Void = { _ in },
         staticRendering: Bool = false
     ) {
         self.state = state
         self.layout = layout
         self.reduceMotion = reduceMotion
         self.suggestionModel = suggestionModel
+        self.pickerModel = pickerModel
         self.onHoverChanged = onHoverChanged
         self.onIslandTap = onIslandTap
         self.onSubmit = onSubmit
@@ -109,6 +118,7 @@ struct IslandView: View {
         self.onOpenInTerminal = onOpenInTerminal
         self.onCopyCommand = onCopyCommand
         self.onOpenSettings = onOpenSettings
+        self.onPickerSelect = onPickerSelect
         self.staticRendering = staticRendering
     }
 
@@ -125,7 +135,8 @@ struct IslandView: View {
     /// inside the 200 pt window and clip the bottom row — see
     /// `SlashSuggestionModel.maxVisibleRows`.
     static func shapeSize(
-        for state: IslandState, layout: IslandLayout, openSuggestionRows: Int = 0
+        for state: IslandState, layout: IslandLayout, openSuggestionRows: Int = 0,
+        openPickerRows: Int = 0
     ) -> CGSize {
         switch state {
         case .collapsed, .running:
@@ -134,6 +145,18 @@ struct IslandView: View {
             // "Grown ~10 pt": 10 pt per side horizontally, 10 pt down.
             return CGSize(width: layout.islandSize.width + 20, height: layout.islandSize.height + 10)
         case .open:
+            // Picker mode wins (mirrors CaptureView's rendering precedence).
+            // Its base is 90 pt, not 120: the hint line is hidden in picker
+            // mode, which is exactly what lets 5 × 22 pt rows fit inside the
+            // constant 200 pt window (90 + 5 × 22 = 200; the suggestion
+            // list's 120 pt base fits only 4).
+            if openPickerRows > 0 {
+                let pickerRows = CGFloat(min(openPickerRows, ResumePickerModel.maxVisibleRows))
+                return CGSize(
+                    width: layout.windowSize.width,
+                    height: min(90 + pickerRows * ResumePickerList.rowHeight, layout.windowSize.height)
+                )
+            }
             let rows = CGFloat(min(max(openSuggestionRows, 0), SlashSuggestionModel.maxVisibleRows))
             return CGSize(
                 width: layout.windowSize.width,
@@ -168,8 +191,22 @@ struct IslandView: View {
         return suggestionModel.visibleRowCount
     }
 
+    /// > 0 exactly while the /resume picker is active (then at least 1 — the
+    /// "No matching sessions" row keeps one row of height under an
+    /// over-narrow filter).
+    private var openPickerRows: Int {
+        guard state == .open, !staticRendering, let pickerModel, pickerModel.isActive
+        else { return 0 }
+        return max(1, pickerModel.visibleRowCount)
+    }
+
     private var shapeSize: CGSize {
-        Self.shapeSize(for: state, layout: layout, openSuggestionRows: openSuggestionRows)
+        Self.shapeSize(
+            for: state,
+            layout: layout,
+            openSuggestionRows: openSuggestionRows,
+            openPickerRows: openPickerRows
+        )
     }
 
     private var bottomRadius: CGFloat {
@@ -194,9 +231,11 @@ struct IslandView: View {
             .onHover(perform: onHoverChanged)
             .onTapGesture(perform: onIslandTap)
             .animation(IslandMotion.animation(reduceMotion: reduceMotion), value: state)
-            // The open shape growing/shrinking with the suggestion list uses
-            // the same one spring (or reduced-motion fade) as state changes.
+            // The open shape growing/shrinking with the suggestion list (or
+            // the /resume picker) uses the same one spring (or reduced-motion
+            // fade) as state changes.
             .animation(IslandMotion.animation(reduceMotion: reduceMotion), value: openSuggestionRows)
+            .animation(IslandMotion.animation(reduceMotion: reduceMotion), value: openPickerRows)
             .frame(
                 width: layout.windowSize.width,
                 height: layout.windowSize.height,
@@ -223,7 +262,9 @@ struct IslandView: View {
                 staticRendering: staticRendering,
                 onSubmit: onSubmit,
                 restoreInput: captureRestoreInput,
-                suggestionModel: suggestionModel
+                suggestionModel: suggestionModel,
+                pickerModel: pickerModel,
+                onPickerSelect: onPickerSelect
             )
         case .running:
             // Animated status dot at the notch edge (only animates while a

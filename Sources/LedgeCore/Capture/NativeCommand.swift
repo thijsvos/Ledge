@@ -38,7 +38,7 @@ public enum NativeCommand: String, CaseIterable, Sendable {
         case .settings: "Open Ledge settings"
         case .checks: "Run the setup checks"
         case .vault: "Reveal the vault in Finder"
-        case .resume: "Resume the last agent session in Terminal"
+        case .resume: "Resume a recent agent session in Terminal"
         case .cancel: "Cancel the running agent run (and queued ones)"
         case .quit: "Quit Ledge"
         }

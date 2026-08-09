@@ -315,6 +315,19 @@ public actor ClaudeRunner {
         return trimmed
     }
 
+    /// Best-effort session ID of the current (or most recently executed) run
+    /// — the /cancel history seam. A SIGTERMed child's `runCompleted` event
+    /// IS still emitted by the worker loop, but the App layer's /cancel path
+    /// stops consuming events and drops the runner before it could observe
+    /// it, so the cancelled-run history record reads the parser's extracted
+    /// `session_id` here instead (the init event typically arrives within
+    /// the run's first second). The parser is reset per run and no run can
+    /// start after `terminateAll()`, so post-cancel this stays the cancelled
+    /// run's value.
+    public var lastObservedSessionID: String? {
+        parser.sessionID ?? parser.result?.sessionID
+    }
+
     /// Test hook: is the most recently spawned child still alive?
     func lastChildIsRunningForTesting() -> Bool {
         lastSpawnedProcess?.isRunning ?? false

@@ -106,6 +106,16 @@ public final class IslandController {
     /// and `open` may overlay a still-live run.
     public private(set) var liveRun: RunHandle?
 
+    /// Monotonic count of accepted transitions INTO `.open` from a different
+    /// state (a no-op `.open → .open` does not bump it). Async work started
+    /// while the island was open (e.g. the /resume history load) captures
+    /// this and, on return, verifies it still faces the SAME open session:
+    /// any dismiss→reopen — or leave-for-`.running`→reopen — in between bumps
+    /// the generation, so `state == .open` alone can never be mistaken for
+    /// "the open I started from". Bookkeeping, not UI state, hence
+    /// observation-ignored.
+    @ObservationIgnored public private(set) var openGeneration = 0
+
     private let logger = Logger(subsystem: "app.ledge", category: "island")
     private let signposter = OSSignposter(subsystem: "app.ledge", category: "perf")
     private let peekDuration: TimeInterval
@@ -135,6 +145,9 @@ public final class IslandController {
         peekExpiryTask?.cancel()
         peekExpiryTask = nil
         state = newState
+        if newState == .open, current != .open {
+            openGeneration &+= 1
+        }
         if case let .running(handle) = newState {
             liveRun = handle
         }

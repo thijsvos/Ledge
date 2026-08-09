@@ -4,7 +4,12 @@ import SwiftUI
 /// The open-state capture UI (§5): one text field, a subtle `/` hint, and a
 /// target chip that live-updates from `CaptureRouter` as the user types —
 /// plus, while the text is a bare `/command` token, the slash-command
-/// typeahead list (SlashSuggestionList).
+/// typeahead list (SlashSuggestionList), OR — while the /resume picker is
+/// active — the recent-session list (ResumePickerList). Picker mode wins over
+/// the suggestion list; it also replaces the placeholder ("Filter sessions —
+/// Enter resumes, Esc closes"), hides the hint line (that's what buys the
+/// fifth row inside the constant 200 pt window), and hides the target chip
+/// (Enter resumes a session, it doesn't route a capture).
 ///
 /// Enter hands the raw input to the coordinator via `onSubmit` and clears the
 /// field; the coordinator performs the write synchronously (<5 ms in practice)
@@ -12,10 +17,13 @@ import SwiftUI
 /// never blocked on I/O. If the capture FAILS, the coordinator keeps the raw
 /// input and `restoreInput` refills the field on the next open — typed text is
 /// never lost to a failure peek. Esc handling is unchanged from Phase 1 (the
-/// window controller's key monitor dismisses the open island).
+/// window controller's key monitor dismisses the open island). In picker mode
+/// Enter/↑/↓ are swallowed by that same key monitor before the field ever
+/// sees them.
 ///
 /// The field's text lives in `SlashSuggestionModel` (owned by the window
-/// controller, whose key monitor completes into the field); each appearance
+/// controller, whose key monitor completes into the field) — or, while the
+/// picker is active, in `ResumePickerModel.filterText`; each appearance
 /// resets it from `restoreInput`, so a dismissed island still discards its
 /// text exactly as when the text was view-local @State.
 struct CaptureView: View {
@@ -23,7 +31,8 @@ struct CaptureView: View {
     var topClearance: CGFloat
     /// ImageRenderer cannot rasterize the AppKit-backed TextField;
     /// --render-preview sets this to draw a static stand-in instead (§9).
-    /// The static branch renders NO suggestion UI — previews are unchanged.
+    /// The static branch renders NO suggestion or picker UI — previews are
+    /// unchanged.
     var staticRendering: Bool
     /// Called with the raw field contents on Enter.
     var onSubmit: (String) -> Void
@@ -35,6 +44,11 @@ struct CaptureView: View {
     /// bare `IslandView(state:)`) falls back to an inert view-local model
     /// with an empty catalog — no suggestions, field still works.
     var suggestionModel: SlashSuggestionModel?
+    /// The controller-owned /resume picker model. Nil (previews) = never in
+    /// picker mode.
+    var pickerModel: ResumePickerModel?
+    /// Row click in the picker → resume that session.
+    var onPickerSelect: (RunRecord) -> Void = { _ in }
 
     @State private var fallbackModel = SlashSuggestionModel()
     @FocusState private var fieldFocused: Bool
@@ -43,16 +57,22 @@ struct CaptureView: View {
         suggestionModel ?? fallbackModel
     }
 
+    /// Non-nil exactly while picker mode is on (picker wins over suggestions).
+    private var picker: ResumePickerModel? {
+        guard let pickerModel, pickerModel.isActive else { return nil }
+        return pickerModel
+    }
+
     private static let placeholder = "Capture a thought…"
+    private static let pickerPlaceholder = "Filter sessions — Enter resumes, Esc closes"
     private static let hint = "↩ save · / agent · .i inbox"
 
     /// "daily" / "inbox" / "agent" / "ledge", from the model's
     /// `submitActionOnReturn` — the SAME condition the key monitor and the
     /// list highlight use, `SubmitAction.decide` included. Deriving the chip
     /// from `decide(text)` alone would lie exactly when it matters most:
-    /// for "/q" decide says .agent("q") but Enter auto-completes the single
-    /// match and runs /quit (LedgeCore-tested seam, so the chip and Enter
-    /// can never diverge).
+    /// for "/q" decide says .agent("q") while Enter actually runs /quit
+    /// (LedgeCore-tested seam, so the chip and Enter can never diverge).
     private var targetLabel: String {
         switch model.submitActionOnReturn {
         case .native:
@@ -61,6 +81,17 @@ struct CaptureView: View {
             "agent"
         case let .routed(.instant(target, _)):
             target == .inbox ? "inbox" : "daily"
+        }
+    }
+
+    /// The field binds to the picker's filter while picker mode is active,
+    /// else to the typeahead model — one TextField, stable identity, so
+    /// focus survives entering and leaving picker mode.
+    private var fieldText: Binding<String> {
+        if let picker {
+            Bindable(picker).filterText
+        } else {
+            Bindable(model).text
         }
     }
 
@@ -74,20 +105,29 @@ struct CaptureView: View {
                         .foregroundStyle(.white.opacity(0.5))
                         .frame(maxWidth: .infinity, alignment: .leading)
                 } else {
-                    TextField(Self.placeholder, text: Bindable(model).text)
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 15))
-                        .foregroundStyle(.white)
-                        .tint(.white)
-                        .focused($fieldFocused)
-                        .onSubmit(submit)
+                    TextField(
+                        picker == nil ? Self.placeholder : Self.pickerPlaceholder,
+                        text: fieldText
+                    )
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 15))
+                    .foregroundStyle(.white)
+                    .tint(.white)
+                    .focused($fieldFocused)
+                    .onSubmit(submit)
                 }
-                targetChip
+                if picker == nil {
+                    targetChip
+                }
             }
-            Text(Self.hint)
-                .font(.system(size: 10))
-                .foregroundStyle(.white.opacity(0.3))
-            if !staticRendering, model.isListVisible {
+            if picker == nil {
+                Text(Self.hint)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.white.opacity(0.3))
+            }
+            if !staticRendering, let picker {
+                ResumePickerList(model: picker, onSelect: onPickerSelect)
+            } else if !staticRendering, model.isListVisible {
                 SlashSuggestionList(model: model)
             }
             Spacer()
@@ -111,6 +151,11 @@ struct CaptureView: View {
     }
 
     private func submit() {
+        // Picker mode: Enter belongs to the key monitor (resume the selected
+        // row) — it swallows the event before the field sees it. Belt and
+        // braces for any path that still lands here (nothing to submit; the
+        // filter text is not a capture).
+        guard picker == nil else { return }
         let input = model.text
         model.text = "" // §5: the field clears after submit
         onSubmit(input)

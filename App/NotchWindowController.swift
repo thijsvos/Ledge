@@ -10,6 +10,7 @@ struct NotchRootView: View {
     var layout: IslandLayout
     var reduceMotion: Bool
     var suggestionModel: SlashSuggestionModel
+    var pickerModel: ResumePickerModel
     var onHoverChanged: (Bool) -> Void
     var onTap: () -> Void
     var onSubmit: (String) -> Void
@@ -17,6 +18,7 @@ struct NotchRootView: View {
     var onOpenInTerminal: (ResumeAction) -> Void
     var onCopyCommand: (ResumeAction) -> Void
     var onOpenSettings: () -> Void
+    var onPickerSelect: (RunRecord) -> Void
 
     var body: some View {
         IslandView(
@@ -24,13 +26,15 @@ struct NotchRootView: View {
             layout: layout,
             reduceMotion: reduceMotion,
             suggestionModel: suggestionModel,
+            pickerModel: pickerModel,
             onHoverChanged: onHoverChanged,
             onIslandTap: onTap,
             onSubmit: onSubmit,
             captureRestoreInput: captureRestoreInput,
             onOpenInTerminal: onOpenInTerminal,
             onCopyCommand: onCopyCommand,
-            onOpenSettings: onOpenSettings
+            onOpenSettings: onOpenSettings,
+            onPickerSelect: onPickerSelect
         )
     }
 }
@@ -70,6 +74,13 @@ final class NotchWindowController: NSObject {
     /// Its suggestion source is the STATIC native-command list (LedgeCore's
     /// `NativeCommand`) — nothing to scan for the UI.
     private let suggestionModel = SlashSuggestionModel()
+    /// /resume picker (view-model state only — the island simply stays
+    /// `.open` while it shows): rows loaded by AgentRunController from the
+    /// run history, selection driven by the same local key monitor, rendered
+    /// by ResumePickerList inside CaptureView. Reset on every dismiss and on
+    /// every transition into `.open`, so a reopened island always starts in
+    /// normal capture mode.
+    private let resumePickerModel = ResumePickerModel()
     /// The user's Claude Code commands/skills, rescanned by
     /// `scanSlashCommands()` once per transition into `.open` — event-driven,
     /// zero polling/timers/watchers (§10). NOT shown in the suggestion list
@@ -98,13 +109,15 @@ final class NotchWindowController: NSObject {
                 layout: layout,
                 reduceMotion: false,
                 suggestionModel: suggestionModel,
+                pickerModel: resumePickerModel,
                 onHoverChanged: { _ in },
                 onTap: {},
                 onSubmit: { _ in },
                 captureRestoreInput: { nil },
                 onOpenInTerminal: { _ in },
                 onCopyCommand: { _ in },
-                onOpenSettings: {}
+                onOpenSettings: {},
+                onPickerSelect: { _ in }
             )
         )
         super.init()
@@ -119,6 +132,16 @@ final class NotchWindowController: NSObject {
             self?.captureCoordinator.preserveInput(
                 prompt.hasPrefix("/") ? prompt : "/" + prompt
             )
+        }
+
+        // /resume found sessions to offer: enter picker mode — view-model
+        // state only, the island stays `.open` (AgentRunController fires this
+        // only after re-checking the island is still the same open session
+        // /resume was typed in, via the openGeneration token, AND that no
+        // run started meanwhile).
+        agentRunController.onEnterResumePicker = { [weak self] records, seeded in
+            guard let self, island.state == .open else { return }
+            resumePickerModel.activate(records: records, seededLastSession: seeded)
         }
 
         // Submit-time slash restoration: CaptureRouter strips the leading
@@ -139,7 +162,7 @@ final class NotchWindowController: NSObject {
             runChecks: { [weak self] in self?.runChecksFromCommand() },
             revealVault: { [weak self] in self?.revealVaultFromCommand() },
             resumeLastSession: { [weak self] in
-                self?.agentRunController.resumeLastSessionInTerminal()
+                self?.agentRunController.presentResumePicker()
             },
             cancelRuns: { [weak self] in self?.agentRunController.cancelAllRuns() },
             // The existing shutdown path (applicationWillTerminate →
@@ -256,13 +279,15 @@ final class NotchWindowController: NSObject {
             layout: layout,
             reduceMotion: reduceMotion,
             suggestionModel: suggestionModel,
+            pickerModel: resumePickerModel,
             onHoverChanged: { [weak self] hovering in self?.hoverChanged(hovering) },
             onTap: { [weak self] in self?.islandTapped() },
             onSubmit: { [weak self] input in self?.captureCoordinator.submit(input) },
             captureRestoreInput: { [weak self] in self?.captureCoordinator.consumeRestoreInput() },
             onOpenInTerminal: { [weak self] resume in self?.agentRunController.openInTerminal(resume) },
             onCopyCommand: { [weak self] resume in self?.agentRunController.copyCommand(resume) },
-            onOpenSettings: { [weak self] in self?.openSettingsFromPeek() }
+            onOpenSettings: { [weak self] in self?.openSettingsFromPeek() },
+            onPickerSelect: { [weak self] record in self?.resumeFromPicker(record) }
         )
     }
 
@@ -299,8 +324,12 @@ final class NotchWindowController: NSObject {
             return
         }
         // Scan only on the actual transition INTO .open — a tap while
-        // already open must not rescan.
+        // already open must not rescan. Every entry into .open starts in
+        // normal capture mode (the /resume picker never survives a reopen).
         let wasAlreadyOpen = island.state == .open
+        if !wasAlreadyOpen {
+            resumePickerModel.deactivate()
+        }
         island.transition(to: .open)
         if !wasAlreadyOpen {
             scanSlashCommands()
@@ -318,6 +347,7 @@ final class NotchWindowController: NSObject {
         if island.state == .open {
             dismissToIdle()
         } else {
+            resumePickerModel.deactivate() // open always starts in capture mode
             island.transition(to: .open)
             scanSlashCommands()
         }
@@ -391,6 +421,10 @@ final class NotchWindowController: NSObject {
         // Discarding here matches the documented dismissal behavior (typed
         // text is discarded; onAppear still restores failed-capture input).
         suggestionModel.text = ""
+        // Every dismissal also leaves /resume picker mode — Esc while the
+        // picker is up therefore collapses in ONE press (exit picker AND
+        // collapse), and the next open starts in normal capture mode.
+        resumePickerModel.deactivate()
         if let run = island.liveRun {
             island.transition(to: .running(run))
         } else {
@@ -456,6 +490,17 @@ final class NotchWindowController: NSObject {
     ///           text submits as before — never a row that isn't visibly
     ///           highlighted. The bare "/" never auto-runs anything.
     /// * Esc   — dismiss (Phase 1, untouched).
+    ///
+    /// While the /resume PICKER is active its keys win over the suggestion
+    /// keys (checked first; the suggestion list isn't rendered then anyway):
+    /// * ↓ / ↑ — move the picker selection; wraps at both ends.
+    /// * Enter — resume the highlighted session: exit picker mode, dismiss,
+    ///           then the existing openInTerminal machinery. With a filter
+    ///           matching nothing, Enter is swallowed and does nothing (the
+    ///           filter text is never a capture).
+    /// * Esc   — the normal dismiss above (dismissToIdle deactivates the
+    ///           picker), so ONE press exits picker mode and collapses.
+    ///
     /// Modified keys (⌘⌃⌥⇧) are never intercepted, and while the field's
     /// input context holds marked text (an IME composition — e.g. CJK), the
     /// list keys are never intercepted either: ↓/↑/Return then belong to the
@@ -466,6 +511,28 @@ final class NotchWindowController: NSObject {
         if event.keyCode == 53 { // Esc
             dismissToIdle()
             return true
+        }
+
+        if resumePickerModel.isActive {
+            guard
+                event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty,
+                !fieldHasMarkedText()
+            else { return false }
+            switch event.keyCode {
+            case 125: // ↓
+                resumePickerModel.moveSelection(by: 1)
+                return true
+            case 126: // ↑
+                resumePickerModel.moveSelection(by: -1)
+                return true
+            case 36, 76: // Return / keypad Enter
+                if let record = resumePickerModel.selectedRecord {
+                    resumeFromPicker(record)
+                }
+                return true // swallowed even with no selection — never a submit
+            default:
+                return false
+            }
         }
 
         guard suggestionModel.isListVisible,
@@ -506,6 +573,18 @@ final class NotchWindowController: NSObject {
         NSTextInputContext.current?.client.hasMarkedText() == true
     }
 
+    /// Enter on (or click of) a picker row: leave picker mode, dismiss the
+    /// island (BEFORE opening — openInTerminal's write-failure peek routes
+    /// through showPeek, which is dropped while `.open`), then the EXISTING
+    /// §6 escape-hatch machinery resumes that exact session in Terminal —
+    /// via the picker entry point, which re-checks the live-run guard last.
+    private func resumeFromPicker(_ record: RunRecord) {
+        guard let sessionID = record.sessionID else { return } // model filters; defensive
+        let action = ResumeAction(vaultPath: record.vaultPath, sessionID: sessionID)
+        dismissToIdle() // deactivates the picker and collapses
+        agentRunController.openInTerminalFromPicker(action)
+    }
+
     private func handleLocalMouseDown(_ event: NSEvent) {
         guard island.state == .open else { return }
         guard event.window === window else {
@@ -513,12 +592,14 @@ final class NotchWindowController: NSObject {
             return
         }
         // Same numbers IslandView draws with: shape is top-centered in the
-        // constant window frame (including the suggestion-list growth, so a
-        // click on a row is never mistaken for click-outside).
+        // constant window frame (including the suggestion-list or picker
+        // growth, so a click on a row is never mistaken for click-outside).
         let size = IslandView.shapeSize(
             for: island.state,
             layout: layout,
-            openSuggestionRows: suggestionModel.visibleRowCount
+            openSuggestionRows: suggestionModel.visibleRowCount,
+            openPickerRows: resumePickerModel.isActive
+                ? max(1, resumePickerModel.visibleRowCount) : 0
         )
         let shapeRect = CGRect(
             x: (window.frame.width - size.width) / 2,

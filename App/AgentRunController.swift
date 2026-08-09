@@ -67,14 +67,53 @@ final class AgentRunController: AgentRunSubmitting {
     /// bad vault, no binary, queue full) so CaptureCoordinator can preserve
     /// the typed input — text is never lost to a failure peek.
     var onSubmissionRejected: ((_ prompt: String) -> Void)?
+    /// /resume found sessions to offer: the window controller (which owns the
+    /// picker view-model) activates picker mode with these rows. Fired only
+    /// while the island is still `.open` on the controller's side.
+    /// `seededLastSession` is true when the single row is the stored
+    /// per-vault lastSessionID fallback — the UI then renders it neutrally
+    /// (no time, no outcome glyph) because Ledge stores only the ID, not
+    /// when the session ran or how it ended.
+    var onEnterResumePicker: ((_ records: [RunRecord], _ seededLastSession: Bool) -> Void)?
+    /// Local run history (JSONL in Ledge's own Application Support — §2:
+    /// never the vault, never ~/.claude). Written on completion events and
+    /// read by /resume, both OFF the main actor; best-effort throughout.
+    private let historyStore: RunHistoryStore
+    /// Serializes ALL history I/O: every append (completion AND /cancel)
+    /// chains onto the previous one, so file order provably equals
+    /// completion order — which is exactly what `recentRuns`' newest-first-
+    /// by-file-order relies on — and `compactIfNeeded` (called from append)
+    /// can never race another in-flight append and silently discard it. The
+    /// /resume read awaits this chain too, so a read can never overtake the
+    /// append of a completion whose peek the user just saw.
+    private var historyChain: Task<Void, Never>?
     private let logger = Logger(subsystem: "app.ledge", category: "runner")
 
-    init(island: IslandController, defaults: UserDefaults = .standard) {
+    init(
+        island: IslandController,
+        defaults: UserDefaults = .standard,
+        historyStore: RunHistoryStore? = nil
+    ) {
         self.island = island
         self.defaults = defaults
+        self.historyStore = historyStore ?? RunHistoryStore(fileURL: Self.defaultHistoryURL())
         let override = Self.storedOverride(in: defaults)
         resolver = ClaudeBinaryResolver(overridePath: override)
         resolverOverridePath = override
+    }
+
+    /// appSupport/Ledge/run-history.jsonl — the App layer supplies the URL;
+    /// LedgeCore never hardcodes it. The `?? home` fallback can effectively
+    /// never fire (macOS always reports an Application Support directory)
+    /// but keeps this force-unwrap-free.
+    private static func defaultHistoryURL() -> URL {
+        let base = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support", isDirectory: true)
+        return base
+            .appendingPathComponent("Ledge", isDirectory: true)
+            .appendingPathComponent("run-history.jsonl", isDirectory: false)
     }
 
     /// The §7 Settings binary override; empty string = unset.
@@ -225,22 +264,28 @@ final class AgentRunController: AgentRunSubmitting {
 
     // MARK: - Native commands (/resume, /cancel)
 
-    /// The `/resume` native command: opens Terminal resuming the last stored
-    /// session for the current vault, via the exact §6 escape-hatch machinery
-    /// (`openInTerminal`). The stored ID passes the same `ResumePolicy` guard
-    /// as "continue last" — but `enabled` is hardwired true: typing /resume
-    /// IS the explicit ask, independent of the Settings toggle. An invalid
-    /// stored ID is cleared (never considered again) and reads as "none".
-    /// No vault or no valid session → failure peek; success → the island
-    /// dismisses to idle (Terminal activates, not Ledge).
-    func resumeLastSessionInTerminal() {
+    /// The `/resume` native command: offers a picker of recent recorded
+    /// sessions for the current vault inside the open island; selecting one
+    /// opens that exact session in Terminal via the §6 escape-hatch machinery
+    /// (`openInTerminal`). The island STAYS `.open` while the picker is up —
+    /// picker mode is view-model state owned by the window controller
+    /// (`ResumePickerModel`), reached through `onEnterResumePicker`;
+    /// IslandState is untouched.
+    ///
+    /// The history is read OFF the main actor (like the catalog scan). When
+    /// it yields no resumable session, the stored per-vault lastSessionID
+    /// default seeds a single "last session" row — same `ResumePolicy` guard
+    /// as "continue last", with `enabled` hardwired true: typing /resume IS
+    /// the explicit ask. An invalid stored ID is cleared (never considered
+    /// again). Nothing at all → info peek.
+    func presentResumePicker() {
         // §2.4 discipline (spirit): /resume must not put a second `claude` to
         // work in the vault while a headless run is live, queued, or still in
         // its pre-enqueue pipeline (`island.liveRun` is set synchronously on
         // Enter, before the runner bookkeeping catches up) — the Terminal
         // process would edit the same vault the child is editing, possibly
         // resuming the very session the live run holds.
-        guard liveHandle == nil, queueDepth == 0, island.liveRun == nil else {
+        guard resumeRunGuardHolds else {
             island.transition(to: .peek(.info(message: "Run in progress — /cancel first")))
             return
         }
@@ -248,27 +293,123 @@ final class AgentRunController: AgentRunSubmitting {
             let configuredPath = defaults.string(forKey: DefaultsKey.vaultPath),
             !configuredPath.isEmpty
         else {
-            island.transition(to: .peek(.failure(message: "No session to resume", resume: nil)))
+            island.transition(to: .peek(.failure(
+                message: "No vault set — open Settings…", resume: nil, configuration: true
+            )))
             return
         }
         let vaultPath = (configuredPath as NSString).expandingTildeInPath
-        let sessionKey = DefaultsKey.lastSessionID(vaultPath: vaultPath)
-        let choice = ResumePolicy.pickResumeSessionID(
-            enabled: true,
-            stored: defaults.string(forKey: sessionKey)
-        )
-        if choice.shouldClearStored {
-            logger.error("stored session ID invalid — clearing \(sessionKey, privacy: .public)")
-            defaults.removeObject(forKey: sessionKey)
+        let store = historyStore
+        // Captured NOW, checked again when the load lands: the picker may
+        // only activate in the SAME open session /resume was typed in.
+        let generation = island.openGeneration
+        Task { [weak self] in
+            // /cancel (and retirement) clear the run bookkeeping BEFORE the
+            // SIGTERMed child is actually dead — wait for the drain exactly
+            // like submit's enqueue does (§2.4), so a picker-initiated
+            // Terminal `claude` can never overlap the dying child in the
+            // vault. Bonus: the drain appends the cancelled run's record, so
+            // a /resume right after /cancel offers that very session.
+            await self?.retirementDrain?.value
+            guard let self else { return }
+            let chain = historyChain
+            // Off the main actor: synchronous file I/O, like the catalog
+            // scan. Awaiting the chain first means the read can never
+            // overtake a still-pending completion append.
+            let runs = await Task.detached(priority: .userInitiated) {
+                await chain?.value
+                return store.recentRuns(vaultPath: vaultPath)
+            }.value
+            presentLoadedResumePicker(runs: runs, vaultPath: vaultPath, generation: generation)
         }
-        guard let sessionID = choice.sessionID else {
-            island.transition(to: .peek(.failure(message: "No session to resume", resume: nil)))
+    }
+
+    /// The §2.4-spirit condition under which /resume may proceed: nothing
+    /// live, nothing queued, nothing in its pre-enqueue pipeline. Checked at
+    /// command time AND re-checked when the async history load lands (plus
+    /// `retiredRunners.isEmpty` there — a retired child may still be dying).
+    private var resumeRunGuardHolds: Bool {
+        liveHandle == nil && queueDepth == 0 && island.liveRun == nil
+    }
+
+    /// Back on the main actor with the loaded history: decide between picker,
+    /// seeded last-session row, and the empty-state peek.
+    private func presentLoadedResumePicker(
+        runs: [RunRecord],
+        vaultPath: String,
+        generation: Int
+    ) {
+        // Staleness re-checks — the load was async and the world may have
+        // moved:
+        // - The island must not only still be `.open`, it must be the SAME
+        //   open session /resume was typed in: a dismiss→reopen (or
+        //   submit→reopen) during the load bumps `openGeneration`, and a
+        //   picker popping into a fresh capture session would silently turn
+        //   the user's next Enter into a Terminal resume.
+        guard island.state == .open, island.openGeneration == generation else { return }
+        // - The run guard must still hold: a run submitted during the load
+        //   wins over the picker (§2.4 spirit — never a Terminal `claude`
+        //   beside a headless child in the same vault), and a freshly
+        //   retired runner's child may still be alive. Dropped silently: the
+        //   reopened field may hold the user's typing, which a peek would
+        //   destroy.
+        guard resumeRunGuardHolds, retiredRunners.isEmpty else {
+            logger.info("/resume dropped: a run started or was retired during the history load")
             return
         }
-        // Dismiss BEFORE opening: openInTerminal's write-failure peek routes
-        // through showPeek, which is dropped while the island is `.open`.
-        dismissToIdle()
-        openInTerminal(ResumeAction(vaultPath: vaultPath, sessionID: sessionID))
+        var rows = ResumePickerModel.resumableRecords(runs)
+        var seededLastSession = false
+        if rows.isEmpty {
+            // Pre-history fallback: the stored per-vault last session ID.
+            let sessionKey = DefaultsKey.lastSessionID(vaultPath: vaultPath)
+            let choice = ResumePolicy.pickResumeSessionID(
+                enabled: true,
+                stored: defaults.string(forKey: sessionKey)
+            )
+            if choice.shouldClearStored {
+                logger.error("stored session ID invalid — clearing \(sessionKey, privacy: .public)")
+                defaults.removeObject(forKey: sessionKey)
+            }
+            if let sessionID = choice.sessionID {
+                // UserDefaults stores ONLY the ID — when this session ran and
+                // how it ended are unknown (it may be hours old, persisted
+                // from a failed run). `date`/`outcome` are inert placeholders
+                // the UI never shows: the `seededLastSession` flag makes the
+                // row render neutrally (no time, no glyph).
+                seededLastSession = true
+                rows = [RunRecord(
+                    id: UUID(),
+                    date: Date(),
+                    vaultPath: vaultPath,
+                    prompt: "last session",
+                    sessionID: sessionID,
+                    outcome: .success,
+                    editedFiles: [],
+                    durationMS: nil,
+                    resultExcerpt: nil,
+                    stderrTail: []
+                )]
+            }
+        }
+        guard !rows.isEmpty else {
+            island.transition(to: .peek(.info(message: "No sessions recorded yet")))
+            return
+        }
+        onEnterResumePicker?(rows, seededLastSession)
+    }
+
+    /// Picker-row resume (Enter or click): the same §6 escape hatch,
+    /// re-guarded. Between picker activation and Enter no run can normally
+    /// start (Enter is swallowed by the key monitor while the picker is up,
+    /// and activation required an idle runner), so this is cheap belt and
+    /// braces: never hand Terminal a `claude --resume` into the vault while
+    /// a headless child lives or a retired one is still dying.
+    func openInTerminalFromPicker(_ resume: ResumeAction) {
+        guard resumeRunGuardHolds, retiredRunners.isEmpty else {
+            showPeek(.info(message: "Run in progress — /cancel first"))
+            return
+        }
+        openInTerminal(resume)
     }
 
     /// The `/cancel` native command: terminate the live child and drop the
@@ -319,8 +460,20 @@ final class AgentRunController: AgentRunSubmitting {
     /// chained behind never spawned anything (it was rejected — its failure
     /// peek already explains why), so there is nothing to kill and no peek
     /// to show.
+    ///
+    /// History: the SIGTERMed child's `runCompleted` event IS still emitted
+    /// by the runner's worker loop (SIGTERM → termination handler → a
+    /// `.failure(.nonZeroExit)` completion), but this method cancels
+    /// `eventsTask` and nils `runner` first, so the App layer never observes
+    /// it (the identity guard would drop it even if the loop resumed once
+    /// more). The cancelled run is therefore recorded HERE: prompt and vault
+    /// are captured before the bookkeeping clears, and the session ID is read
+    /// off the retired runner's parser (`lastObservedSessionID`) once the
+    /// child is dead — best-effort, like all history.
     private func performCancellation() {
         guard let previous = runner else { return }
+        let cancelledPrompt = liveHandle?.prompt
+        let cancelledVaultPath = runnerVaultPath
         eventsTask?.cancel()
         eventsTask = nil
         island.clearLiveRun()
@@ -338,6 +491,25 @@ final class AgentRunController: AgentRunSubmitting {
             // Returns once the child has exited; dropped prompts discarded
             // deliberately (cancellation, not retirement).
             _ = await previous.terminateAll()
+            if let prompt = cancelledPrompt, let vaultPath = cancelledVaultPath {
+                let sessionID = await previous.lastObservedSessionID
+                let record = RunRecord(
+                    id: UUID(),
+                    date: Date(),
+                    vaultPath: vaultPath,
+                    prompt: prompt,
+                    sessionID: sessionID,
+                    outcome: .cancelled,
+                    editedFiles: [],
+                    durationMS: nil,
+                    resultExcerpt: nil,
+                    stderrTail: []
+                )
+                // Chained like every other append (main-actor hop): the
+                // cancelled record can never race — or be clobbered by the
+                // compaction inside — a completion append.
+                await self?.appendHistory(record)
+            }
             await self?.finishCancellation(of: previous)
         }
     }
@@ -489,6 +661,7 @@ final class AgentRunController: AgentRunSubmitting {
     }
 
     private func handle(completion: RunCompletion) {
+        recordHistory(for: completion)
         liveHandle = nil
         // Another queued run starts immediately when depth > 0; only a fully
         // idle runner clears the live-run dot (peek expiry then falls back to
@@ -510,6 +683,64 @@ final class AgentRunController: AgentRunSubmitting {
                 return ResumeAction(vaultPath: vaultPath, sessionID: sessionID)
             }
             showPeek(.failure(message: Self.message(for: failure), resume: resume))
+        }
+    }
+
+    // MARK: - Run history (best-effort, §2: Ledge's own App Support only)
+
+    /// Builds and appends the history record for a completed run. Failures
+    /// are logged (category "runner"), never surfaced — the history must
+    /// never turn a successful run into a failure peek.
+    private func recordHistory(for completion: RunCompletion) {
+        guard let vaultPath = runnerVaultPath else { return }
+        let record = switch completion.outcome {
+        case let .success(summary):
+            RunRecord(
+                id: UUID(),
+                date: Date(),
+                vaultPath: vaultPath,
+                prompt: completion.handle.prompt,
+                sessionID: summary.sessionID,
+                outcome: .success,
+                editedFiles: summary.editedFiles,
+                durationMS: summary.durationMS,
+                resultExcerpt: summary.resultText, // init truncates to 500
+                stderrTail: []
+            )
+        case let .failure(failure):
+            RunRecord(
+                id: UUID(),
+                date: Date(),
+                vaultPath: vaultPath,
+                prompt: completion.handle.prompt,
+                sessionID: failure.sessionID,
+                outcome: .failure(reason: Self.headline(for: failure)),
+                editedFiles: [],
+                durationMS: nil,
+                resultExcerpt: nil,
+                stderrTail: failure.stderrTail
+            )
+        }
+        appendHistory(record)
+    }
+
+    /// The ONE way history is written: a link on `historyChain`, running OFF
+    /// the main actor (like the catalog scan) but strictly after every
+    /// earlier append. Called on the main actor in completion order, so file
+    /// order equals completion order — see `historyChain`.
+    private func appendHistory(_ record: RunRecord) {
+        let store = historyStore
+        let log = logger
+        let previous = historyChain
+        historyChain = Task.detached(priority: .utility) {
+            await previous?.value
+            do {
+                try store.append(record)
+            } catch {
+                log.error(
+                    "run-history append failed: \(error.localizedDescription, privacy: .public)"
+                )
+            }
         }
     }
 
@@ -592,8 +823,11 @@ final class AgentRunController: AgentRunSubmitting {
         }
     }
 
-    private static func message(for failure: RunFailure) -> String {
-        let headline = switch failure.reason {
+    /// One-line cause, shared by the failure peek's first line and the
+    /// history record's `failure(reason:)` (which keeps the stderr tail in
+    /// its own field).
+    private static func headline(for failure: RunFailure) -> String {
+        switch failure.reason {
         case let .nonZeroExit(code):
             "Run failed (exit \(code))"
         case let .errorResult(subtype):
@@ -605,6 +839,10 @@ final class AgentRunController: AgentRunSubmitting {
         case let .spawnFailed(detail):
             "Couldn't launch Claude: \(detail)"
         }
+    }
+
+    private static func message(for failure: RunFailure) -> String {
+        let headline = headline(for: failure)
         // §6: the failure peek shows the stderr tail — all of the last 3
         // lines, not just the final one.
         let tail = failure.stderrTail.filter { !$0.isEmpty }

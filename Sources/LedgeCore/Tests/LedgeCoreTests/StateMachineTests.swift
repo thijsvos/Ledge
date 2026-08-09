@@ -93,6 +93,46 @@ final class StateMachineTests: XCTestCase {
         XCTAssertEqual(peeking.state, .peek(.queued(position: 2)))
     }
 
+    // MARK: - openGeneration bookkeeping
+
+    /// The open-session token async work (the /resume history load) uses to
+    /// detect a dismiss→reopen behind its back: every accepted entry INTO
+    /// `.open` from another state bumps it; the no-op `.open → .open` and
+    /// transitions that never enter `.open` do not.
+    func testOpenGenerationBumpsOnlyOnEntryIntoOpen() {
+        let controller = IslandController()
+        XCTAssertEqual(controller.openGeneration, 0)
+
+        controller.transition(to: .open)
+        XCTAssertEqual(controller.openGeneration, 1)
+        controller.transition(to: .open) // no-op re-open: same session
+        XCTAssertEqual(controller.openGeneration, 1)
+
+        // Dismiss → reopen: a NEW open session.
+        controller.transition(to: .collapsed)
+        XCTAssertEqual(controller.openGeneration, 1)
+        controller.transition(to: .open)
+        XCTAssertEqual(controller.openGeneration, 2)
+
+        // Leave for .running (Enter submits) → tap back open: new session too.
+        controller.transition(to: .running(handle))
+        controller.transition(to: .open)
+        XCTAssertEqual(controller.openGeneration, 3)
+
+        // Transitions not entering .open never bump it.
+        controller.transition(to: .peek(peekContent))
+        controller.transition(to: .collapsed)
+        controller.transition(to: .hover)
+        XCTAssertEqual(controller.openGeneration, 3)
+    }
+
+    func testRejectedTransitionDoesNotBumpOpenGeneration() {
+        let controller = makeController(in: .running(handle))
+        let before = controller.openGeneration
+        XCTAssertFalse(controller.transition(to: .hover)) // illegal
+        XCTAssertEqual(controller.openGeneration, before)
+    }
+
     // MARK: - liveRun bookkeeping
 
     func testRunningTransitionSetsLiveRun() {

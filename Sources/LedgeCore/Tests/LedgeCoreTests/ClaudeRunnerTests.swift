@@ -366,6 +366,35 @@ final class ClaudeRunnerTests: XCTestCase {
         }
     }
 
+    /// The /cancel history seam: after terminateAll SIGTERMs a live run, the
+    /// parser's extracted session ID stays readable via
+    /// `lastObservedSessionID` — the App layer records the cancelled run from
+    /// exactly this, because it stops consuming events before the SIGTERMed
+    /// child's completion is emitted.
+    func testLastObservedSessionIDSurvivesTermination() async throws {
+        let runner = try makeRunner(mode: "slow", sleepSeconds: "30")
+        guard case .started = await runner.enqueue(prompt: "live") else {
+            return XCTFail("must start")
+        }
+        // slow mode emits the init event (with the session ID) immediately;
+        // poll until the parser has seen it.
+        let deadline = Date().addingTimeInterval(5)
+        var observed: String?
+        while observed == nil, Date() < deadline {
+            observed = await runner.lastObservedSessionID
+            if observed == nil {
+                try await Task.sleep(for: .milliseconds(20))
+            }
+        }
+        XCTAssertNotNil(observed, "init event must have carried a session ID")
+
+        await runner.terminateAll()
+
+        let afterKill = await runner.lastObservedSessionID
+        XCTAssertEqual(afterKill, observed)
+        XCTAssertEqual(afterKill?.hasPrefix("fake-session-"), true)
+    }
+
     /// terminateAll returns only once the child is actually dead — the caller
     /// may immediately spawn a replacement runner in the SAME vault (§2.4:
     /// one live run per vault), so returning early would overlap two agents.
