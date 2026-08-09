@@ -684,7 +684,12 @@ final class NotchWindowController: NSObject {
 
     private func applyWindowSideEffects() {
         let isOpen = island.state == .open
-        window.hasShadow = isOpen // §4: shadow ON only when open
+        // Documented deviation from §4 ("shadow ON only when open"), by user
+        // request: a borderless NSWindow with a shadow gets a ~1 px rim
+        // highlight along its top edge, which shows as a seam across the
+        // physical notch and betrays the illusion that the notch itself is
+        // expanding. The shadow therefore stays OFF in every state.
+        window.hasShadow = false
         if isOpen {
             window.allowsKeyStatus = true
             window.makeKeyAndOrderFront(nil)

@@ -28,7 +28,7 @@ final class NotchWindow: NSPanel {
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         isOpaque = false
         backgroundColor = .clear
-        hasShadow = false // shadow ON only while .open (toggled by the controller)
+        hasShadow = false // never enabled — its top rim highlight would seam the notch
         hidesOnDeactivate = false
         isMovableByWindowBackground = false
         isReleasedWhenClosed = false
