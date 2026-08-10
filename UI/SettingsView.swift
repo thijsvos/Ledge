@@ -180,13 +180,12 @@ struct SettingsView: View {
                     text: $claudeModel,
                     prompt: Text("Your Claude Code default")
                 )
-                Text("e.g. sonnet, haiku, opus")
+                Text("e.g. sonnet, opus")
                     .font(.callout)
                     .foregroundStyle(.tertiary)
             }
             Picker("Effort", selection: $claudeEffort) {
                 Text("CLI default").tag(DefaultsKey.effortCLIDefault)
-                Text("low").tag("low")
                 Text("medium").tag("medium")
                 Text("high (Ledge default)").tag("high")
                 Text("xhigh").tag("xhigh")
