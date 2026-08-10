@@ -129,6 +129,7 @@ final class ClaudeRunnerTests: XCTestCase {
                 "--allowedTools", "Read,Write,Edit,Glob,Grep",
                 "--permission-mode", "acceptEdits",
                 "--max-turns", "6",
+                "--strict-mcp-config",
             ]
         )
         XCTAssertEqual(
@@ -143,7 +144,7 @@ final class ClaudeRunnerTests: XCTestCase {
         )
         // The §2.3 sandbox prefix is untouched…
         XCTAssertEqual(
-            Array(args.prefix(11)),
+            Array(args.prefix(12)),
             ClaudeRunner.arguments(prompt: "p", resumeSessionID: nil)
         )
         // …and the overrides slot in before --resume.

@@ -292,6 +292,11 @@ public actor ClaudeRunner {
             "--allowedTools", "Read,Write,Edit,Glob,Grep",
             "--permission-mode", "acceptEdits",
             "--max-turns", "6",
+            // With no --mcp-config given, strict mode connects ZERO MCP
+            // servers: note-work never needs them, the user's configured
+            // servers cost a handshake on every run, and fewer capabilities
+            // is strictly §2-friendlier.
+            "--strict-mcp-config",
         ]
         if let model = sanitizeOverride(model) {
             args += ["--model", model]
