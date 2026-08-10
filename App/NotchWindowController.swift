@@ -12,6 +12,7 @@ struct NotchRootView: View {
     var suggestionModel: SlashSuggestionModel
     var pickerModel: ResumePickerModel
     var openLayoutModel: OpenLayoutModel
+    var runStatusModel: RunStatusModel
     var onHoverChanged: (Bool) -> Void
     var onTap: () -> Void
     var onSubmit: (String) -> Void
@@ -29,6 +30,7 @@ struct NotchRootView: View {
             suggestionModel: suggestionModel,
             pickerModel: pickerModel,
             openLayoutModel: openLayoutModel,
+            runStatusModel: runStatusModel,
             onHoverChanged: onHoverChanged,
             onIslandTap: onTap,
             onSubmit: onSubmit,
@@ -67,6 +69,14 @@ final class NotchWindowController: NSObject {
     private var reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
 
     private var hoverTask: Task<Void, Never>?
+    /// The raw pointer-inside signal, tracked from EVERY onHover edge
+    /// regardless of state. The hover machinery needs it because onHover only
+    /// fires on pointer enter/exit: a `.running → .peek → .running` bounce
+    /// (completion peek expiring into the next queued run, a peek hovered
+    /// mid-flight) clears the running-hover flag with the pointer stationary
+    /// inside the shape, and only this signal can re-arm the chip then — see
+    /// `syncRunningHoverToState`.
+    private var pointerInsideIsland = false
     private var localMouseMonitor: Any?
     private var globalMouseMonitor: Any?
     private var localKeyMonitor: Any?
@@ -90,6 +100,16 @@ final class NotchWindowController: NSObject {
     /// through or dead-zone. Reset on every dismiss and on every transition
     /// into `.open` (fresh field), like the picker model.
     private let openLayoutModel = OpenLayoutModel()
+    /// Live-run status for the hover chip (LedgeCore), following the exact
+    /// OpenLayoutModel pattern: ONE instance feeds AgentRunController's run
+    /// bookkeeping (prompt + start date), this controller's hover flag AND
+    /// click-outside hit-test, and IslandView's drawn shape — the widened
+    /// running chip and its hit-test can never disagree. The hover flag is
+    /// owned HERE: the existing hover machinery sets it (same 80 ms
+    /// debounce), pointer exit and any state change away from `.running`
+    /// clear it. No IslandState transition is involved — `.running → .hover`
+    /// stays illegal.
+    private let runStatusModel: RunStatusModel
     /// The user's Claude Code commands/skills, rescanned by
     /// `scanSlashCommands()` once per transition into `.open` — event-driven,
     /// zero polling/timers/watchers (§10). NOT shown in the suggestion list
@@ -102,9 +122,11 @@ final class NotchWindowController: NSObject {
     override init() {
         let island = IslandController()
         self.island = island
+        let runStatusModel = RunStatusModel()
+        self.runStatusModel = runStatusModel
         // Phase-3 wiring (§6): the runner façade adopts AgentRunSubmitting;
         // `/` prompts flow CaptureView → CaptureCoordinator → AgentRunController.
-        let agentRunController = AgentRunController(island: island)
+        let agentRunController = AgentRunController(island: island, runStatus: runStatusModel)
         self.agentRunController = agentRunController
         captureCoordinator = CaptureCoordinator(island: island, agentRunner: agentRunController)
         let snapshot = Self.currentScreenSnapshot()
@@ -120,6 +142,7 @@ final class NotchWindowController: NSObject {
                 suggestionModel: suggestionModel,
                 pickerModel: resumePickerModel,
                 openLayoutModel: openLayoutModel,
+                runStatusModel: runStatusModel,
                 onHoverChanged: { _ in },
                 onTap: {},
                 onSubmit: { _ in },
@@ -291,6 +314,7 @@ final class NotchWindowController: NSObject {
             suggestionModel: suggestionModel,
             pickerModel: resumePickerModel,
             openLayoutModel: openLayoutModel,
+            runStatusModel: runStatusModel,
             onHoverChanged: { [weak self] hovering in self?.hoverChanged(hovering) },
             onTap: { [weak self] in self?.islandTapped() },
             onSubmit: { [weak self] input in self?.captureCoordinator.submit(input) },
@@ -305,20 +329,80 @@ final class NotchWindowController: NSObject {
     // MARK: - Interaction
 
     /// Hover with the shared 80 ms debounce; exit collapses immediately.
+    ///
+    /// Two hover targets share this ONE machinery (no extra monitors):
+    /// - `.collapsed` → the `.hover` affordance state, exactly as before.
+    /// - `.running` → the status chip: the same debounce sets the shared
+    ///   `RunStatusModel.isHoveringWhileRunning` flag WITHOUT any IslandState
+    ///   transition (`.running → .hover` stays illegal; the chip is
+    ///   view-model state, like the /resume picker). Pointer exit clears it
+    ///   immediately; so does any state change away from `.running` — and a
+    ///   state change back INTO `.running` under a stationary pointer re-arms
+    ///   it (`syncRunningHoverToState`, from the state observation).
     private func hoverChanged(_ hovering: Bool) {
+        pointerInsideIsland = hovering
         hoverTask?.cancel()
         hoverTask = nil
         if hovering {
-            guard island.state == .collapsed else { return }
-            hoverTask = Task { [weak self] in
-                try? await Task.sleep(for: IslandMotion.hoverDebounce)
-                guard let self, !Task.isCancelled else { return }
-                if island.state == .collapsed {
-                    island.transition(to: .hover)
+            switch island.state {
+            case .collapsed:
+                hoverTask = Task { [weak self] in
+                    try? await Task.sleep(for: IslandMotion.hoverDebounce)
+                    guard let self, !Task.isCancelled else { return }
+                    if island.state == .collapsed {
+                        island.transition(to: .hover)
+                    }
                 }
+            case .running:
+                scheduleRunningHoverDebounce()
+            default:
+                break
             }
-        } else if island.state == .hover {
-            island.transition(to: .collapsed)
+        } else {
+            if runStatusModel.isHoveringWhileRunning {
+                runStatusModel.isHoveringWhileRunning = false
+            }
+            if island.state == .hover {
+                island.transition(to: .collapsed)
+            }
+        }
+    }
+
+    /// The ONE 80 ms debounce that flips the running-hover chip on, fired
+    /// from both of its edges: a pointer-enter while `.running`
+    /// (`hoverChanged`) and a transition into `.running` while the pointer
+    /// already rests on the island (`syncRunningHoverToState`). Re-checks
+    /// state AND the raw pointer signal after the sleep — either may have
+    /// moved during the debounce.
+    private func scheduleRunningHoverDebounce() {
+        hoverTask?.cancel()
+        hoverTask = Task { [weak self] in
+            try? await Task.sleep(for: IslandMotion.hoverDebounce)
+            guard let self, !Task.isCancelled else { return }
+            if case .running = island.state, pointerInsideIsland {
+                runStatusModel.isHoveringWhileRunning = true
+            }
+        }
+    }
+
+    /// The running-hover chip must track the state it belongs to, in BOTH
+    /// directions. Away from `.running` (open, peek, collapse): drop the
+    /// flag even though the pointer never left the shape. Back into
+    /// `.running` with the pointer still inside: re-arm the shared debounce —
+    /// a completion peek bouncing into the next queued run's `.running` (or
+    /// a peek the pointer entered mid-flight) produces no onHover edge for a
+    /// stationary pointer, so without this the chip would stay collapsed
+    /// until the user exited and re-entered. Called from the island-state
+    /// observation.
+    private func syncRunningHoverToState() {
+        if case .running = island.state {
+            if pointerInsideIsland, !runStatusModel.isHoveringWhileRunning {
+                scheduleRunningHoverDebounce()
+            }
+            return
+        }
+        if runStatusModel.isHoveringWhileRunning {
+            runStatusModel.isHoveringWhileRunning = false
         }
     }
 
@@ -648,7 +732,8 @@ final class NotchWindowController: NSObject {
             openSuggestionRows: suggestionModel.visibleRowCount,
             openPickerRows: resumePickerModel.isActive
                 ? max(1, resumePickerModel.visibleRowCount) : 0,
-            openFieldExtraHeight: openLayoutModel.fieldExtraHeight
+            openFieldExtraHeight: openLayoutModel.fieldExtraHeight,
+            runningHoverStatus: runStatusModel.isHoveringWhileRunning
         )
         let shapeRect = CGRect(
             x: (window.frame.width - size.width) / 2,
@@ -672,6 +757,7 @@ final class NotchWindowController: NSObject {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 applyWindowSideEffects()
+                syncRunningHoverToState()
                 observeIslandState()
             }
         }

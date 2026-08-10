@@ -25,6 +25,12 @@ import os
 @MainActor
 final class AgentRunController: AgentRunSubmitting {
     private let island: IslandController
+    /// Live-run status for the hover chip (LedgeCore, shared with the window
+    /// controller and IslandView). This controller owns the RUN bookkeeping —
+    /// prompt + start date are set on the same paths that set `liveHandle` /
+    /// `island.liveRun` and cleared on every path that clears them; the hover
+    /// flag inside the model belongs to NotchWindowController.
+    private let runStatus: RunStatusModel
     private let defaults: UserDefaults
     /// One resolver per launch so the login-shell fallback (`/bin/zsh -lc
     /// 'command -v claude'`) runs at most once (§6). Sendable — `resolve()`
@@ -91,10 +97,12 @@ final class AgentRunController: AgentRunSubmitting {
 
     init(
         island: IslandController,
+        runStatus: RunStatusModel = RunStatusModel(),
         defaults: UserDefaults = .standard,
         historyStore: RunHistoryStore? = nil
     ) {
         self.island = island
+        self.runStatus = runStatus
         self.defaults = defaults
         self.historyStore = historyStore ?? RunHistoryStore(fileURL: Self.defaultHistoryURL())
         let override = Self.storedOverride(in: defaults)
@@ -193,11 +201,48 @@ final class AgentRunController: AgentRunSubmitting {
             defaults.removeObject(forKey: sessionKey)
         }
 
+        // Queue-bound is decided NOW, from Enter-time state — a confirmed
+        // live run (`liveHandle`), an earlier Enter's provisional handle
+        // still in its pre-enqueue window (`island.liveRun`, set
+        // synchronously per Enter, which `liveHandle` lags behind by binary
+        // resolution — seconds on first launch), or queued prompts already
+        // waiting. It picks the start peek's wording and gates the hover
+        // chip's provisional bookkeeping below; checked BEFORE the
+        // `.running` transition, which overwrites `island.liveRun`.
+        let queueBound = liveHandle != nil || island.liveRun != nil || queueDepth > 0
+
         // §5: Enter leaves `.open` synchronously — the running dot shows
         // immediately. If a run is already live its handle keeps the dot;
         // otherwise a provisional handle stands in until the runner confirms
-        // (`.started` replaces it; a rejection clears it again).
-        island.transition(to: .running(liveHandle ?? RunHandle(prompt: prompt)))
+        // (`.started` replaces it; a rejection clears it again). An EARLIER
+        // Enter's provisional (`island.liveRun`) is reused, never replaced:
+        // that run goes first, and minting a fresh handle here would flip the
+        // bookkeeping to this queue-bound prompt.
+        island.transition(to: .running(liveHandle ?? island.liveRun ?? RunHandle(prompt: prompt)))
+        if !queueBound {
+            // The hover chip's bookkeeping starts NOW: Enter is the honest
+            // wall-clock zero the user cares about (the runner's runStarted
+            // confirmation lags by binary resolution). A queue-bound
+            // submission must NOT touch the model: it keeps describing the
+            // run that is (or is about to be) live — including a previous
+            // Enter still awaiting confirmation, whose prompt and zero point
+            // a second Enter would otherwise overwrite.
+            runStatus.recordRunStart(prompt: prompt)
+        }
+        // Start acknowledgment: a 2.5 s info peek right on top of the
+        // `.running` transition above — which set `island.liveRun`, so peek
+        // expiry falls back to `.running` and restores the dot. Any
+        // follow-up peek replaces it naturally (peek → peek is legal): the
+        // runner's "Queued #n" for a queued submission, or a rejection /
+        // failure peek. runStarted deliberately fires NO second start peek —
+        // this one already acknowledged the Enter. A queue-bound submission
+        // says "queued" (not "working…") from the start: the runner's
+        // positioned "Queued #n" can lag the whole pipeline (a retirement
+        // drain waits for the old child to die), well past this banner's
+        // 2.5 s, so the Enter-time wording must already be truthful.
+        island.transition(to: .peek(.info(message: Self.startPeekMessage(
+            for: prompt, queueBound: queueBound
+        ))))
 
         let resolver = currentResolver()
         let model = storedModelOverride()
@@ -446,6 +491,7 @@ final class AgentRunController: AgentRunSubmitting {
         // Enter leaves `.open` synchronously (§5): drop the dot and collapse
         // now; the chained cancellation confirms once the child is dead.
         island.clearLiveRun()
+        runStatus.clear()
         dismissToIdle()
         let previousSubmission = submissionChain
         submissionChain = Task { [weak self] in
@@ -477,6 +523,7 @@ final class AgentRunController: AgentRunSubmitting {
         eventsTask?.cancel()
         eventsTask = nil
         island.clearLiveRun()
+        runStatus.clear()
         liveHandle = nil
         queueDepth = 0
         runner = nil
@@ -577,6 +624,7 @@ final class AgentRunController: AgentRunSubmitting {
             // live-run bookkeeping now — otherwise dismiss/peek expiry would
             // keep restoring `.running(staleHandle)` forever.
             island.clearLiveRun()
+            runStatus.clear()
             liveHandle = nil
             queueDepth = 0
             retiredRunners.append(previous)
@@ -663,6 +711,9 @@ final class AgentRunController: AgentRunSubmitting {
     private func handle(completion: RunCompletion) {
         recordHistory(for: completion)
         liveHandle = nil
+        // The finished run's hover-chip status dies with it; when depth > 0
+        // the next run's runStarted repopulates the model immediately.
+        runStatus.clear()
         // Another queued run starts immediately when depth > 0; only a fully
         // idle runner clears the live-run dot (peek expiry then falls back to
         // `.collapsed` instead of `.running`).
@@ -754,6 +805,10 @@ final class AgentRunController: AgentRunSubmitting {
     /// `.running(handle)`.
     private func showRunning(_ handle: RunHandle) {
         liveHandle = handle
+        // Hover-chip bookkeeping rides along with the live-run handle. For
+        // the run just submitted (same prompt) the model keeps the Enter-time
+        // start date; a queued run starting now restarts the clock.
+        runStatus.recordRunStart(prompt: handle.prompt)
         switch island.state {
         case .open, .peek:
             island.setLiveRun(handle)
@@ -789,6 +844,7 @@ final class AgentRunController: AgentRunSubmitting {
         onSubmissionRejected?(prompt)
         if liveHandle == nil {
             island.clearLiveRun()
+            runStatus.clear() // the provisional Enter-time status never ran
         }
         showPeek(.failure(message: message, resume: nil, configuration: configuration))
     }
@@ -798,6 +854,17 @@ final class AgentRunController: AgentRunSubmitting {
     private func persistSessionID(_ sessionID: String?) {
         guard let sessionID, let vaultPath = runnerVaultPath else { return }
         defaults.set(sessionID, forKey: DefaultsKey.lastSessionID(vaultPath: vaultPath))
+    }
+
+    /// The Enter-time acknowledgment banner: "▶ <excerpt> — working…" when
+    /// this submission runs now, "▶ <excerpt> — queued" when Enter-time state
+    /// says it is heading for the queue (the runner's positioned "Queued #n"
+    /// then replaces it once the pipeline lands). The excerpt is the prompt's
+    /// first ~44 characters (RunStatusModel's shared, LedgeCore-tested
+    /// helper — Character-boundary cut, ellipsized).
+    private static func startPeekMessage(for prompt: String, queueBound: Bool) -> String {
+        let excerpt = RunStatusModel.excerpt(of: prompt)
+        return queueBound ? "▶ \(excerpt) — queued" : "▶ \(excerpt) — working…"
     }
 
     private static func message(for reason: RejectionReason) -> String {

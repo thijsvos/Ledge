@@ -177,6 +177,40 @@ final class StateMachineTests: XCTestCase {
 
     // MARK: - Peek expiry
 
+    /// The Enter-time start peek's exact shape: transition into `.running`
+    /// (which sets liveRun) followed IMMEDIATELY by an info peek — the
+    /// ordering the submit path relies on. Entering `.peek` must not disturb
+    /// liveRun, and expiry must restore `.running` with the same handle.
+    func testStartPeekOverFreshRunningRestoresRunningOnExpiry() async throws {
+        let controller = IslandController(peekDuration: 0.05)
+        controller.transition(to: .running(handle))
+        XCTAssertEqual(controller.liveRun, handle, ".running entry must set liveRun before the peek")
+        controller.transition(to: .peek(.info(message: "▶ summarize inbox — working…")))
+        XCTAssertEqual(controller.liveRun, handle, "entering .peek must not clear liveRun")
+        try await Task.sleep(for: .milliseconds(500))
+        XCTAssertEqual(controller.state, .running(handle))
+    }
+
+    /// A rapid SECOND Enter inside the first Enter's pre-enqueue window: the
+    /// submit path detects queue-bound purely from `liveRun`, which the first
+    /// Enter's synchronous `.running(provisional)` set and its start peek
+    /// left intact. The second Enter's own transitions (its `.running` and
+    /// "queued" start peek) ride on top; expiry still restores the dot.
+    func testDoubleEnterProvisionalLiveRunSignalsQueueBound() async throws {
+        let controller = IslandController(peekDuration: 0.05)
+        let first = RunHandle(prompt: "first")
+        controller.transition(to: .running(first))
+        controller.transition(to: .peek(.info(message: "▶ first — working…")))
+        // Second Enter lands here, before any runner confirmation: its
+        // queue-bound check must see the first provisional.
+        XCTAssertEqual(controller.liveRun, first)
+        controller.transition(to: .running(first)) // the submit path reuses the pending provisional
+        controller.transition(to: .peek(.info(message: "▶ second — queued")))
+        XCTAssertEqual(controller.liveRun, first, "the second start peek must not disturb liveRun")
+        try await Task.sleep(for: .milliseconds(500))
+        XCTAssertEqual(controller.state, .running(first))
+    }
+
     func testPeekExpiryReturnsToRunningWhenLiveRunSet() async throws {
         let controller = IslandController(peekDuration: 0.05)
         controller.transition(to: .running(handle))

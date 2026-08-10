@@ -85,6 +85,13 @@ struct IslandView: View {
     /// default, and what --render-preview gets — means picker mode never
     /// renders; previews are unchanged.
     var pickerModel: ResumePickerModel?
+    /// Live-run status (owned by the window controller; AgentRunController
+    /// writes the run bookkeeping, the hover machinery writes the hover
+    /// flag). Nil — the default, and what --render-preview's bare
+    /// `IslandView(state:)` gets — means the running dot never widens into
+    /// the status chip; previews are unchanged (no run exists in a static
+    /// preview anyway).
+    var runStatusModel: RunStatusModel?
     /// The capture field's measured wrap growth (owned by the window
     /// controller; CaptureView publishes into it). Nil — the default, and
     /// what --render-preview gets — means the open shape never grows with
@@ -93,8 +100,6 @@ struct IslandView: View {
     /// Picker row click → resume that session (App layer).
     var onPickerSelect: (RunRecord) -> Void
 
-    @State private var statusDotDimmed = false
-
     init(
         state: IslandState,
         layout: IslandLayout = .default,
@@ -102,6 +107,7 @@ struct IslandView: View {
         suggestionModel: SlashSuggestionModel? = nil,
         pickerModel: ResumePickerModel? = nil,
         openLayoutModel: OpenLayoutModel? = nil,
+        runStatusModel: RunStatusModel? = nil,
         onHoverChanged: @escaping (Bool) -> Void = { _ in },
         onIslandTap: @escaping () -> Void = {},
         onSubmit: @escaping (String) -> Void = { _ in },
@@ -118,6 +124,7 @@ struct IslandView: View {
         self.suggestionModel = suggestionModel
         self.pickerModel = pickerModel
         self.openLayoutModel = openLayoutModel
+        self.runStatusModel = runStatusModel
         self.onHoverChanged = onHoverChanged
         self.onIslandTap = onIslandTap
         self.onSubmit = onSubmit
@@ -145,11 +152,29 @@ struct IslandView: View {
     /// `openFieldExtraHeight` (only meaningful for `.open`) is the capture
     /// field's measured wrap growth (`OpenLayoutModel.fieldExtraHeight`); it
     /// grows the shape the same way and WINS the row budget — see `openPlan`.
+    ///
+    /// `runningHoverStatus` (only meaningful for `.running`) is
+    /// `RunStatusModel.isHoveringWhileRunning`: the dot widens into the
+    /// status chip ("● M:SS · <prompt excerpt>"). Both consumers — the drawn
+    /// shape and the click-outside hit-test — must pass the value from the
+    /// SAME RunStatusModel instance.
     static func shapeSize(
         for state: IslandState, layout: IslandLayout, openSuggestionRows: Int = 0,
-        openPickerRows: Int = 0, openFieldExtraHeight: CGFloat = 0
+        openPickerRows: Int = 0, openFieldExtraHeight: CGFloat = 0,
+        runningHoverStatus: Bool = false
     ) -> CGSize {
         switch state {
+        case .running where runningHoverStatus:
+            // The hover status chip: wide enough for "● M:SS · " plus the
+            // ~44-character prompt excerpt at the chip's 11 pt font (half on
+            // each side of the collapsed island), and a peek-style strip
+            // taller — in notch mode `islandSize` IS the hardware cutout, so
+            // the chip's text row must live BELOW it (bottom-anchored, like
+            // every peek), never centered inside the occluded band.
+            return CGSize(
+                width: layout.islandSize.width + runningStatusChipExtraWidth,
+                height: layout.islandSize.height + runningStatusChipExtraHeight
+            )
         case .collapsed, .running:
             return layout.islandSize
         case .hover:
@@ -186,6 +211,23 @@ struct IslandView: View {
             )
         }
     }
+
+    /// How much wider the island grows when the running dot is hovered into
+    /// the status chip (+220 pt total, split evenly by the top-centered
+    /// layout). A constant, like `.hover`'s +20: the chip shows one fixed
+    /// line — "● M:SS · <prompt excerpt>" — whose excerpt is already capped
+    /// at ~44 characters (`RunStatusModel.excerpt`), so nothing about the
+    /// live prompt may change the shape's size mid-hover.
+    static let runningStatusChipExtraWidth: CGFloat = 220
+
+    /// How much taller the chip is than the collapsed island: a peek-style
+    /// strip below the island for the chip's one text row. In notch mode the
+    /// collapsed island is exactly the hardware cutout — content drawn inside
+    /// that band has no pixels (the camera housing occludes it) — so the row
+    /// bottom-anchors into this strip, the same discipline as PeekView and
+    /// the hover chevron. 28 pt fits the 13 pt row plus PeekView's 8 pt
+    /// bottom padding with breathing room.
+    static let runningStatusChipExtraHeight: CGFloat = 28
 
     /// The `.open` shape's height AND the list-row budget that fits inside
     /// it, from one `OpenIslandLayout.compute` call (LedgeCore-tested math) —
@@ -250,13 +292,24 @@ struct IslandView: View {
         return openLayoutModel.fieldExtraHeight
     }
 
+    /// True while the running dot should render as the hover status chip.
+    /// Reading `isHoveringWhileRunning` in body makes SwiftUI re-render (and
+    /// the shape re-size) when the hover machinery flips it. False when not
+    /// `.running`, in static previews, or without a model (--render-preview's
+    /// bare `IslandView(state:)`).
+    private var runningHoverStatus: Bool {
+        guard case .running = state, !staticRendering, let runStatusModel else { return false }
+        return runStatusModel.isHoveringWhileRunning
+    }
+
     private var shapeSize: CGSize {
         Self.shapeSize(
             for: state,
             layout: layout,
             openSuggestionRows: openSuggestionRows,
             openPickerRows: openPickerRows,
-            openFieldExtraHeight: openFieldExtra
+            openFieldExtraHeight: openFieldExtra,
+            runningHoverStatus: runningHoverStatus
         )
     }
 
@@ -290,6 +343,9 @@ struct IslandView: View {
             // …and the shape growing/shrinking as the capture field wraps
             // onto more or fewer lines uses that same one animation too.
             .animation(IslandMotion.animation(reduceMotion: reduceMotion), value: openFieldExtra)
+            // …and the running dot widening into (or out of) the hover
+            // status chip: the same one spring, reduced motion = fade.
+            .animation(IslandMotion.animation(reduceMotion: reduceMotion), value: runningHoverStatus)
             .frame(
                 width: layout.windowSize.width,
                 height: layout.windowSize.height,
@@ -332,20 +388,20 @@ struct IslandView: View {
             )
         case .running:
             // Animated status dot at the notch edge (only animates while a
-            // run is live — nothing animates when idle). Reduced motion (§7):
-            // the dot stays solid instead of pulsing — enforced reactively
-            // (`onChange`), so flipping the setting WHILE a run is live stops
-            // or starts the pulse immediately, not just on first appearance.
-            Circle()
-                .fill(Color.orange)
-                .frame(width: 6, height: 6)
-                .opacity(statusDotDimmed ? 0.25 : 1)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
-                .padding(.bottom, 5)
-                .padding(.trailing, 10)
-                .onAppear { updateStatusDotPulse() }
-                .onChange(of: reduceMotion) { updateStatusDotPulse() }
-                .onDisappear { statusDotDimmed = false }
+            // run is live — nothing animates when idle). Hovering the dot
+            // widens the island into the status chip: elapsed time + prompt
+            // excerpt, from the shared RunStatusModel. The TimelineView
+            // ticking the elapsed label is mounted ONLY inside the chip —
+            // zero timers when not hovering (§10; an active run with the
+            // pointer parked on the island is not idle).
+            if runningHoverStatus {
+                runningStatusChip
+            } else {
+                PulsingStatusDot(reduceMotion: reduceMotion)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                    .padding(.bottom, 5)
+                    .padding(.trailing, 10)
+            }
         case let .peek(content):
             PeekView(
                 content: content,
@@ -356,15 +412,76 @@ struct IslandView: View {
         }
     }
 
+    /// The hover status chip's content: the same pulsing dot plus
+    /// "M:SS · <prompt excerpt>" (monospaced digits, single line). The
+    /// elapsed label re-renders once per second via TimelineView's periodic
+    /// schedule anchored at the run's start date — no Timer, and the
+    /// schedule exists only while this chip is on screen. A nil start date
+    /// (the sub-second gap between a completion and the next queued run's
+    /// runStarted) renders the excerpt alone rather than a bogus clock.
+    ///
+    /// Bottom-anchored like PeekView's content: the row must sit in the
+    /// `runningStatusChipExtraHeight` strip BELOW the collapsed island —
+    /// in notch mode the island band is the physical cutout and anything
+    /// centered inside it would be occluded by the camera housing.
+    private var runningStatusChip: some View {
+        HStack(spacing: 6) {
+            PulsingStatusDot(reduceMotion: reduceMotion)
+            if let start = runStatusModel?.runStartDate {
+                TimelineView(.periodic(from: start, by: 1)) { context in
+                    Text(
+                        "\(Self.elapsedLabel(from: start, to: context.date)) · \(runStatusModel?.promptExcerpt ?? "")"
+                    )
+                }
+            } else {
+                Text(runStatusModel?.promptExcerpt ?? "")
+            }
+        }
+        .font(.system(size: 11, weight: .medium).monospacedDigit())
+        .foregroundStyle(.white.opacity(0.85))
+        .lineLimit(1)
+        .truncationMode(.tail)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+        .padding(.bottom, 8)
+        .padding(.horizontal, 14)
+    }
+
+    /// "M:SS" elapsed wall-clock label (0:07, 1:42, 13:05 — minutes unpadded,
+    /// seconds always two digits); never negative.
+    static func elapsedLabel(from start: Date, to now: Date) -> String {
+        let seconds = max(0, Int(now.timeIntervalSince(start)))
+        return "\(seconds / 60):" + String(format: "%02d", seconds % 60)
+    }
+}
+
+/// The §4 running-dot pulse, self-contained so the plain dot and the hover
+/// chip each own an independent pulse lifecycle (branch switches then never
+/// race onAppear/onDisappear over shared state). Reduced motion (§7): the
+/// dot stays solid instead of pulsing — enforced reactively (`onChange`), so
+/// flipping the setting WHILE a run is live stops or starts the pulse
+/// immediately, not just on first appearance.
+private struct PulsingStatusDot: View {
+    var reduceMotion: Bool
+    @State private var dimmed = false
+
+    var body: some View {
+        Circle()
+            .fill(Color.orange)
+            .frame(width: 6, height: 6)
+            .opacity(dimmed ? 0.25 : 1)
+            .onAppear { updatePulse() }
+            .onChange(of: reduceMotion) { updatePulse() }
+    }
+
     /// Starts the pulse (IslandMotion.statusDotPulse) or cancels it: setting
     /// the value inside `withAnimation(nil)` retargets the opacity without an
     /// animation, which supersedes an in-flight `repeatForever` — the dot
     /// snaps solid the moment Reduce Motion turns on.
-    private func updateStatusDotPulse() {
+    private func updatePulse() {
         if reduceMotion {
-            withAnimation(nil) { statusDotDimmed = false }
+            withAnimation(nil) { dimmed = false }
         } else {
-            withAnimation(IslandMotion.statusDotPulse) { statusDotDimmed = true }
+            withAnimation(IslandMotion.statusDotPulse) { dimmed = true }
         }
     }
 }
