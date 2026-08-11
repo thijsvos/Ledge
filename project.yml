@@ -33,6 +33,9 @@ targets:
         CFBundleShortVersionString: "0.1.0"
         CFBundleVersion: "1"
         NSPrincipalClass: NSApplication
+        NSDesktopFolderUsageDescription: "Ledge edits notes in your vault; allow access if your vault (or a note it links) lives here."
+        NSDocumentsFolderUsageDescription: "Ledge edits notes in your vault; allow access if your vault (or a note it links) lives here."
+        NSDownloadsFolderUsageDescription: "Ledge edits notes in your vault; allow access if your vault (or a note it links) lives here."
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: app.ledge.Ledge
@@ -40,7 +43,12 @@ targets:
         SWIFT_VERSION: "6.0"
       configs:
         Debug:
-          CODE_SIGN_IDENTITY: "-"
+          # Documented deviation from §3 (Debug ad-hoc "-"): TCC keys folder
+          # permissions to the code signature, and ad-hoc signatures change on
+          # every rebuild — macOS re-prompted for vault access after each
+          # `make run`. A stable Apple Development identity makes grants stick.
+          CODE_SIGN_IDENTITY: "Apple Development"
+          DEVELOPMENT_TEAM: 74Q48XUN7W
 
 schemes:
   Ledge:

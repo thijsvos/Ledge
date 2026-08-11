@@ -22,6 +22,12 @@
 	<string>1</string>
 	<key>LSUIElement</key>
 	<true/>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>Ledge edits notes in your vault; allow access if your vault (or a note it links) lives here.</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>Ledge edits notes in your vault; allow access if your vault (or a note it links) lives here.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>Ledge edits notes in your vault; allow access if your vault (or a note it links) lives here.</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 </dict>
