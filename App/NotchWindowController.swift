@@ -11,6 +11,7 @@ struct NotchRootView: View {
     var reduceMotion: Bool
     var suggestionModel: SlashSuggestionModel
     var pickerModel: ResumePickerModel
+    var modelChoiceModel: ModelChoiceModel
     var openLayoutModel: OpenLayoutModel
     var runStatusModel: RunStatusModel
     var onHoverChanged: (Bool) -> Void
@@ -21,6 +22,7 @@ struct NotchRootView: View {
     var onCopyCommand: (ResumeAction) -> Void
     var onOpenSettings: () -> Void
     var onPickerSelect: (RunRecord) -> Void
+    var onModelChoiceSelect: (RunModelChoice) -> Void
 
     var body: some View {
         IslandView(
@@ -29,6 +31,7 @@ struct NotchRootView: View {
             reduceMotion: reduceMotion,
             suggestionModel: suggestionModel,
             pickerModel: pickerModel,
+            modelChoiceModel: modelChoiceModel,
             openLayoutModel: openLayoutModel,
             runStatusModel: runStatusModel,
             onHoverChanged: onHoverChanged,
@@ -38,7 +41,8 @@ struct NotchRootView: View {
             onOpenInTerminal: onOpenInTerminal,
             onCopyCommand: onCopyCommand,
             onOpenSettings: onOpenSettings,
-            onPickerSelect: onPickerSelect
+            onPickerSelect: onPickerSelect,
+            onModelChoiceSelect: onModelChoiceSelect
         )
     }
 }
@@ -93,6 +97,13 @@ final class NotchWindowController: NSObject {
     /// every transition into `.open`, so a reopened island always starts in
     /// normal capture mode.
     private let resumePickerModel = ResumePickerModel()
+    /// ⌘↩ per-run model chooser (view-model state only — the island stays
+    /// `.open` while it shows, exactly like the /resume picker): activated by
+    /// ⌘↩ on an agent-routed input, selection driven by the same local key
+    /// monitor, rendered by ModelChoiceList inside CaptureView. Reset on
+    /// every dismiss and on every transition into `.open`, like the other
+    /// side-models.
+    private let modelChoiceModel = ModelChoiceModel()
     /// The capture field's measured wrap growth (published by CaptureView's
     /// height preference). ONE instance feeds both IslandView's drawn shape
     /// and this controller's click-outside hit-test — the two must read the
@@ -141,6 +152,7 @@ final class NotchWindowController: NSObject {
                 reduceMotion: false,
                 suggestionModel: suggestionModel,
                 pickerModel: resumePickerModel,
+                modelChoiceModel: modelChoiceModel,
                 openLayoutModel: openLayoutModel,
                 runStatusModel: runStatusModel,
                 onHoverChanged: { _ in },
@@ -150,7 +162,8 @@ final class NotchWindowController: NSObject {
                 onOpenInTerminal: { _ in },
                 onCopyCommand: { _ in },
                 onOpenSettings: {},
-                onPickerSelect: { _ in }
+                onPickerSelect: { _ in },
+                onModelChoiceSelect: { _ in }
             )
         )
         super.init()
@@ -174,6 +187,15 @@ final class NotchWindowController: NSObject {
         // run started meanwhile).
         agentRunController.onEnterResumePicker = { [weak self] records, seeded in
             guard let self, island.state == .open else { return }
+            // The history load is async (and can park on a /cancel drain for
+            // seconds), so a ⌘↩ chooser may have been opened meanwhile in
+            // this same open session. The picker owns the island now: close
+            // the chooser first, keeping the invariant that the two are
+            // never active together — a lingering invisible chooser would
+            // eat the picker's first Esc (Esc checks the chooser first) and
+            // could never auto-close, because the picker rebinds the field
+            // away from the text the chooser watches.
+            modelChoiceModel.deactivate()
             resumePickerModel.activate(records: records, seededLastSession: seeded)
         }
 
@@ -313,6 +335,7 @@ final class NotchWindowController: NSObject {
             reduceMotion: reduceMotion,
             suggestionModel: suggestionModel,
             pickerModel: resumePickerModel,
+            modelChoiceModel: modelChoiceModel,
             openLayoutModel: openLayoutModel,
             runStatusModel: runStatusModel,
             onHoverChanged: { [weak self] hovering in self?.hoverChanged(hovering) },
@@ -322,7 +345,8 @@ final class NotchWindowController: NSObject {
             onOpenInTerminal: { [weak self] resume in self?.agentRunController.openInTerminal(resume) },
             onCopyCommand: { [weak self] resume in self?.agentRunController.copyCommand(resume) },
             onOpenSettings: { [weak self] in self?.openSettingsFromPeek() },
-            onPickerSelect: { [weak self] record in self?.resumeFromPicker(record) }
+            onPickerSelect: { [weak self] record in self?.resumeFromPicker(record) },
+            onModelChoiceSelect: { [weak self] choice in self?.submitWithModelChoice(choice) }
         )
     }
 
@@ -427,6 +451,7 @@ final class NotchWindowController: NSObject {
         let wasAlreadyOpen = island.state == .open
         if !wasAlreadyOpen {
             resumePickerModel.deactivate()
+            modelChoiceModel.deactivate() // open always starts without the ⌘↩ chooser
             openLayoutModel.reset()
         }
         island.transition(to: .open)
@@ -452,6 +477,7 @@ final class NotchWindowController: NSObject {
             dismissToIdle()
         } else {
             resumePickerModel.deactivate() // open always starts in capture mode
+            modelChoiceModel.deactivate() // …without the ⌘↩ chooser
             openLayoutModel.reset() // …and at the base height (fresh one-line field)
             island.transition(to: .open)
             // Same synchronous key grant as islandTapped — the hotkey path
@@ -533,6 +559,10 @@ final class NotchWindowController: NSObject {
         // picker is up therefore collapses in ONE press (exit picker AND
         // collapse), and the next open starts in normal capture mode.
         resumePickerModel.deactivate()
+        // The ⌘↩ model chooser dies with its open session too. (Esc while
+        // the chooser is up never reaches here — the key monitor closes ONLY
+        // the chooser first; this handles submit/click-outside/hotkey paths.)
+        modelChoiceModel.deactivate()
         // The measured field height dies with its field, for the same reason
         // the typeahead text is cleared above: a stale wrap-grown measurement
         // would briefly draw (and hit-test) a too-tall open shape next time.
@@ -603,6 +633,26 @@ final class NotchWindowController: NSObject {
     ///           highlighted. The bare "/" never auto-runs anything.
     /// * Esc   — dismiss (Phase 1, untouched).
     ///
+    /// ⌘↩ (Command+Return, no other modifiers) on an input whose ENTER would
+    /// start an agent run opens the per-run model chooser instead of
+    /// submitting — the run can use a heavier model one time while the
+    /// Settings default stays the everyday choice. "Would start an agent
+    /// run" is judged by `submitActionOnReturn` — the SAME policy Enter, the
+    /// target chip, and the row highlight follow — so a visibly highlighted
+    /// native suggestion ("/q" → /quit) never opens the chooser. While the
+    /// chooser is up:
+    /// * ↓ / ↑ — move the chooser selection; wraps at both ends.
+    /// * Enter — submit the CURRENT field text as an agent run with the
+    ///           selected choice (the normal submit path, plus the choice).
+    /// * Esc   — close ONLY the chooser; the field text and the open island
+    ///           are preserved. Deliberate deviation from the resume picker's
+    ///           collapse-on-Esc: the user is mid-composition here, and
+    ///           throwing the typed prompt away because they peeked at the
+    ///           chooser would be hostile. A second Esc dismisses as always.
+    /// * Any text edit closes the chooser (CaptureView watches the field
+    ///   text); typing simply continues.
+    /// ⌘↩ on a non-agent route falls through untouched (nothing special).
+    ///
     /// While the /resume PICKER is active its keys win over the suggestion
     /// keys (checked first; the suggestion list isn't rendered then anyway):
     /// * ↓ / ↑ — move the picker selection; wraps at both ends.
@@ -613,14 +663,29 @@ final class NotchWindowController: NSObject {
     /// * Esc   — the normal dismiss above (dismissToIdle deactivates the
     ///           picker), so ONE press exits picker mode and collapses.
     ///
-    /// Modified keys (⌘⌃⌥⇧) are never intercepted, and while the field's
-    /// input context holds marked text (an IME composition — e.g. CJK), the
-    /// list keys are never intercepted either: ↓/↑/Return then belong to the
-    /// input method's candidate window and composition commit.
+    /// Precedence: Esc · Shift+Return · ⌘↩ activation · picker keys ·
+    /// chooser keys · suggestion keys. (Picker and chooser are never active
+    /// together: chooser activation requires no picker, and picker
+    /// activation — which lands from an ASYNC /resume history load, possibly
+    /// after a ⌘↩ opened the chooser meanwhile — deactivates the chooser
+    /// first (see `onEnterResumePicker`). The order mirrors the rendering
+    /// precedence anyway.)
+    ///
+    /// Modified keys (⌘⌃⌥⇧) are never intercepted — except the ⌘↩ activation
+    /// chord itself — and while the field's input context holds marked text
+    /// (an IME composition — e.g. CJK), the list keys are never intercepted
+    /// either: ↓/↑/Return then belong to the input method's candidate window
+    /// and composition commit.
     private func handleLocalKeyDown(_ event: NSEvent) -> Bool {
         guard island.state == .open else { return false }
 
         if event.keyCode == 53 { // Esc
+            if modelChoiceModel.isActive {
+                // Chooser only — the typed prompt and the open field survive
+                // (documented deviation from the picker's collapse-on-Esc).
+                modelChoiceModel.deactivate()
+                return true
+            }
             dismissToIdle()
             return true
         }
@@ -643,6 +708,35 @@ final class NotchWindowController: NSObject {
             return true
         }
 
+        // ⌘↩ (Return / keypad Enter with ONLY Command) on an input whose
+        // Enter would start an agent run: open the per-run model chooser.
+        // Routing uses `submitActionOnReturn` — the SAME policy Enter, the
+        // target chip, and the row highlight all follow — NOT bare
+        // `SubmitAction.decide(text)`: for "/q" decide says .agent("q")
+        // while Enter actually runs the highlighted /quit (chip: "ledge"),
+        // and a chooser opened there would launch an agent run the UI never
+        // advertised. Native commands and instant captures have no model to
+        // choose, so ⌘↩ falls through untouched there. Never during IME
+        // composition, never in picker mode; a second ⌘↩ while the chooser
+        // is already up is swallowed (the chooser stays, selection
+        // preserved).
+        if event.keyCode == 36 || event.keyCode == 76,
+           event.modifierFlags.contains(.command),
+           event.modifierFlags.intersection([.control, .option, .shift]).isEmpty,
+           !resumePickerModel.isActive,
+           !fieldHasMarkedText()
+        {
+            guard case .routed(.agent) = suggestionModel.submitActionOnReturn else {
+                return false // Enter wouldn't start an agent run: fall through untouched
+            }
+            if !modelChoiceModel.isActive {
+                modelChoiceModel.activate(
+                    configuredModelName: agentRunController.configuredModelName()
+                )
+            }
+            return true
+        }
+
         if resumePickerModel.isActive {
             guard
                 event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty,
@@ -660,6 +754,30 @@ final class NotchWindowController: NSObject {
                     resumeFromPicker(record)
                 }
                 return true // swallowed even with no selection — never a submit
+            default:
+                return false
+            }
+        }
+
+        // ⌘↩ model chooser keys — win over the suggestion keys (the
+        // suggestion list is hidden while the chooser is up).
+        if modelChoiceModel.isActive {
+            guard
+                event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty,
+                !fieldHasMarkedText()
+            else { return false }
+            switch event.keyCode {
+            case 125: // ↓
+                modelChoiceModel.moveSelection(by: 1)
+                return true
+            case 126: // ↑
+                modelChoiceModel.moveSelection(by: -1)
+                return true
+            case 36, 76: // Return / keypad Enter
+                if let choice = modelChoiceModel.selectedChoice {
+                    submitWithModelChoice(choice)
+                }
+                return true // swallowed even with no selection (defensive)
             default:
                 return false
             }
@@ -715,6 +833,19 @@ final class NotchWindowController: NSObject {
         agentRunController.openInTerminalFromPicker(action)
     }
 
+    /// Enter on (or click of) a ⌘↩ chooser row: submit the CURRENT field
+    /// text as an agent run carrying the selected per-run model choice.
+    /// Mirrors CaptureView.submit exactly — chooser closed, field cleared,
+    /// raw input through the coordinator's normal submit path (which routes,
+    /// restores a known command's slash, and leaves `.open` synchronously).
+    private func submitWithModelChoice(_ choice: RunModelChoice) {
+        guard modelChoiceModel.isActive else { return } // stale click; defensive
+        let input = suggestionModel.text
+        modelChoiceModel.deactivate()
+        suggestionModel.text = ""
+        captureCoordinator.submit(input, modelChoice: choice)
+    }
+
     private func handleLocalMouseDown(_ event: NSEvent) {
         guard island.state == .open else { return }
         guard event.window === window else {
@@ -732,6 +863,8 @@ final class NotchWindowController: NSObject {
             openSuggestionRows: suggestionModel.visibleRowCount,
             openPickerRows: resumePickerModel.isActive
                 ? max(1, resumePickerModel.visibleRowCount) : 0,
+            openChooserRows: modelChoiceModel.isActive
+                ? modelChoiceModel.visibleRowCount : 0,
             openFieldExtraHeight: openLayoutModel.fieldExtraHeight,
             runningHoverStatus: runStatusModel.isHoveringWhileRunning
         )

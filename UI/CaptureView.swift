@@ -60,8 +60,15 @@ struct CaptureView: View {
     /// The controller-owned /resume picker model. Nil (previews) = never in
     /// picker mode.
     var pickerModel: ResumePickerModel?
+    /// The controller-owned ⌘↩ per-run model chooser. Nil (previews) = never
+    /// in chooser mode. Picker mode wins over the chooser; the chooser wins
+    /// over the suggestion list.
+    var modelChoiceModel: ModelChoiceModel?
     /// Row click in the picker → resume that session.
     var onPickerSelect: (RunRecord) -> Void = { _ in }
+    /// Row click in the ⌘↩ chooser → submit the current field text with that
+    /// per-run model choice.
+    var onModelChoiceSelect: (RunModelChoice) -> Void = { _ in }
     /// Where the field's measured height is published (owned by the window
     /// controller — the same instance IslandView and the hit-test read).
     /// Nil (previews / --render-preview) = never measured, never grown.
@@ -84,6 +91,13 @@ struct CaptureView: View {
     private var picker: ResumePickerModel? {
         guard let pickerModel, pickerModel.isActive else { return nil }
         return pickerModel
+    }
+
+    /// Non-nil exactly while the ⌘↩ chooser is up (hidden by picker mode;
+    /// hides the suggestion list itself).
+    private var chooser: ModelChoiceModel? {
+        guard let modelChoiceModel, modelChoiceModel.isActive else { return nil }
+        return modelChoiceModel
     }
 
     private static let placeholder = "Capture a thought…"
@@ -161,15 +175,30 @@ struct CaptureView: View {
             }
             // listRowLimit == 0 (a tall wrapped field spent the whole row
             // budget) renders no list AT ALL — not even a zero-height frame,
-            // whose stack spacing would still nudge the layout.
+            // whose stack spacing would still nudge the layout. Precedence
+            // mirrors IslandView.openPlan exactly: picker > ⌘↩ chooser >
+            // suggestions.
             if !staticRendering, listRowLimit > 0, let picker {
                 ResumePickerList(model: picker, onSelect: onPickerSelect, rowLimit: listRowLimit)
+            } else if !staticRendering, listRowLimit > 0, let chooser {
+                ModelChoiceList(
+                    model: chooser, onSelect: onModelChoiceSelect, rowLimit: listRowLimit
+                )
             } else if !staticRendering, listRowLimit > 0, model.isListVisible {
                 SlashSuggestionList(model: model, rowLimit: listRowLimit)
             }
             Spacer()
         }
         .padding(.horizontal, 24)
+        .onChange(of: model.text) {
+            // Any text edit while the ⌘↩ chooser is up closes it — the
+            // chooser was offered for the text as it stood at ⌘↩, and typing
+            // simply continues the composition (guarded so ordinary typing
+            // never churns the observable model).
+            if modelChoiceModel?.isActive == true {
+                modelChoiceModel?.deactivate()
+            }
+        }
         .onPreferenceChange(CaptureFieldHeightKey.self) { [openLayoutModel, model, pickerModel] height in
             // Preferences are delivered on the main thread; the closure is
             // merely typed non-isolated (and captures only Sendable

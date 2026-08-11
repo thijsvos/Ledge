@@ -33,6 +33,7 @@ final class RunHistoryTests: XCTestCase {
         prompt: String = "summarize inbox",
         vaultPath: String = "/tmp/vault",
         sessionID: String? = "sess-1234-abcd",
+        model: String? = nil,
         outcome: RunRecord.Outcome = .success,
         date: Date = Date(timeIntervalSinceReferenceDate: 777_000_000.125),
         editedFiles: [String] = ["daily/2026-08-08.md"],
@@ -46,6 +47,7 @@ final class RunHistoryTests: XCTestCase {
             vaultPath: vaultPath,
             prompt: prompt,
             sessionID: sessionID,
+            model: model,
             outcome: outcome,
             editedFiles: editedFiles,
             durationMS: durationMS,
@@ -247,6 +249,46 @@ final class RunHistoryTests: XCTestCase {
         // Whole-line records, no doubled newlines anywhere.
         XCTAssertNil(data.range(of: Data([0x0A, 0x0A])))
         XCTAssertEqual(try rawLines().count, 2)
+    }
+
+    // MARK: - Additive model field
+
+    func testModelFieldRoundTripsWhenSet() throws {
+        let store = makeStore()
+        let record = makeRecord(prompt: "with model", model: "opus")
+        try store.append(record)
+        let loaded = store.recentRuns(vaultPath: "/tmp/vault")
+        XCTAssertEqual(loaded, [record])
+        XCTAssertEqual(loaded.first?.model, "opus")
+    }
+
+    /// The `model` field is ADDITIVE: a pre-field JSONL line (no "model" key
+    /// anywhere — the exact shape every record had before the ⌘↩ chooser)
+    /// must still decode, with `model` nil. Belt and braces both ways: a
+    /// handcrafted old-format line decodes, and a nil-model record encodes
+    /// WITHOUT the key (so new files stay readable by the old decoder too).
+    func testPreModelFieldLinesStillDecode() throws {
+        let store = makeStore()
+        let nilModel = makeRecord(prompt: "nil model")
+        try store.append(nilModel)
+        XCTAssertFalse(
+            try rawLines()[0].contains("\"model\""),
+            "a nil model must encode as an ABSENT key — the old line shape"
+        )
+
+        // A literal old-format line, as HEAD e4137b2 wrote it.
+        var contents = try String(contentsOf: fileURL, encoding: .utf8)
+        contents += """
+        {"date":700000000,"durationMS":7,"editedFiles":[],\
+        "id":"9C4B4C1E-0000-0000-0000-000000000001","outcome":{"success":{}},\
+        "prompt":"old line","resultExcerpt":null,"sessionID":"sess-old-1",\
+        "stderrTail":[],"vaultPath":"/tmp/vault"}\n
+        """
+        try Data(contents.utf8).write(to: fileURL)
+
+        let loaded = store.recentRuns(vaultPath: "/tmp/vault")
+        XCTAssertEqual(loaded.map(\.prompt), ["old line", "nil model"])
+        XCTAssertEqual(loaded.map(\.model), [nil, nil])
     }
 
     // MARK: - Content edge cases

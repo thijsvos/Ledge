@@ -163,6 +163,25 @@ final class SlashSuggestionModelTests: XCTestCase {
         )
     }
 
+    func testChooserGateNeverAgentRoutesAHighlightedNativeSuggestion() {
+        // The ⌘↩ per-run model chooser activates only when
+        // `submitActionOnReturn` is agent-routed (the window controller
+        // gates on this seam, NOT on bare `SubmitAction.decide`): wherever
+        // the two diverge, Enter runs a native command — the chip shows
+        // "ledge", the row is highlighted — and offering a model there would
+        // launch an agent run the UI never advertised.
+        let model = SlashSuggestionModel()
+        model.text = "/q" // single match → Enter auto-runs /quit
+        XCTAssertEqual(SubmitAction.decide(model.text), .routed(.agent(prompt: "q")))
+        XCTAssertEqual(model.submitActionOnReturn, .native(.quit)) // gate: no chooser
+        model.text = "/c" // ambiguous, then an explicit ↓ highlights /cancel
+        model.moveSelection(by: 1)
+        XCTAssertEqual(SubmitAction.decide(model.text), .routed(.agent(prompt: "c")))
+        XCTAssertEqual(model.submitActionOnReturn, .native(.cancel)) // gate: no chooser
+        model.text = "/q " // token ended (shadow escape): agent again — chooser eligible
+        XCTAssertEqual(model.submitActionOnReturn, .routed(.agent(prompt: "q ")))
+    }
+
     // MARK: - Completion
 
     func testCompletionTextIsSlashNameSpace() {

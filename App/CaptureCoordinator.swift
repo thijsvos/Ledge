@@ -11,8 +11,17 @@ protocol AgentRunSubmitting: AnyObject {
     /// that a prompt whose first token names a known slash command keeps its
     /// leading `/` (see `SlashCommandCatalog.restoringCommandSlash`), so the
     /// headless child dispatches the command instead of reading its name as
-    /// prose.
-    func submitAgentRun(prompt: String)
+    /// prose. `modelChoice` is the ⌘↩ per-run model selection; `.configured`
+    /// (every pre-chooser path) is the Settings default.
+    func submitAgentRun(prompt: String, modelChoice: RunModelChoice)
+}
+
+extension AgentRunSubmitting {
+    /// Default-choice shim so pre-chooser call sites compile (and behave)
+    /// unchanged — protocols cannot carry default parameter values.
+    func submitAgentRun(prompt: String) {
+        submitAgentRun(prompt: prompt, modelChoice: .configured)
+    }
 }
 
 /// The App layer's behavior table for Ledge's native slash commands
@@ -91,18 +100,23 @@ final class CaptureCoordinator {
     /// of `.open` synchronously (into the resulting peek, or straight to idle
     /// for an empty submit). Native commands leave `.open` through their
     /// behavior (peek, dismiss-then-window, or app termination).
-    func submit(_ input: String) {
+    ///
+    /// `modelChoice` is the ⌘↩ per-run model selection; it is forwarded ONLY
+    /// into the agent route — native commands and instant captures ignore it
+    /// (there is no model to choose). The `.configured` default keeps every
+    /// pre-chooser call site byte-identical.
+    func submit(_ input: String, modelChoice: RunModelChoice = .configured) {
         switch SubmitAction.decide(input) {
         case let .native(command):
             execute(native: command)
         case let .routed(route):
-            submit(route: route, rawInput: input)
+            submit(route: route, rawInput: input, modelChoice: modelChoice)
         }
     }
 
     /// The §5 routes, exactly as before native commands existed. `rawInput`
     /// is the field text as typed — what a failed capture preserves.
-    private func submit(route: CaptureRoute, rawInput: String) {
+    private func submit(route: CaptureRoute, rawInput: String, modelChoice: RunModelChoice) {
         switch route {
         case let .agent(prompt):
             if let agentRunner {
@@ -111,7 +125,8 @@ final class CaptureCoordinator {
                 // the slash or the child reads it as prose (prompt content
                 // is not part of the pinned §2.3 argv shape).
                 agentRunner.submitAgentRun(
-                    prompt: slashCommandCatalog().restoringCommandSlash(prompt)
+                    prompt: slashCommandCatalog().restoringCommandSlash(prompt),
+                    modelChoice: modelChoice
                 )
             } else {
                 island.transition(to: .peek(.info(message: "Agent runs arrive in Phase 3")))

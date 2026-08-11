@@ -183,7 +183,15 @@ public actor ClaudeRunner {
 
     /// FIFO enqueue. `resumeSessionID` is plumbing for the Phase-4
     /// "continue last session" toggle; default nil = fresh session (§6).
-    public func enqueue(prompt: String, resumeSessionID: String? = nil) -> Enqueued {
+    /// `modelChoice` is the ⌘↩ per-run model selection; the default
+    /// `.configured` is byte-identical to pre-chooser behavior (the spawn
+    /// site resolves it against `Configuration.model` — see
+    /// `RunModelChoice.effectiveModel`). Effort is untouched by every choice.
+    public func enqueue(
+        prompt: String,
+        resumeSessionID: String? = nil,
+        modelChoice: RunModelChoice = .configured
+    ) -> Enqueued {
         guard !isShuttingDown else {
             logger.error("enqueue rejected: runner is shutting down")
             return .rejected(reason: .shuttingDown)
@@ -204,7 +212,11 @@ public actor ClaudeRunner {
             return .rejected(reason: .invalidVault)
         }
 
-        let run = PendingRun(handle: RunHandle(prompt: prompt), resumeSessionID: resumeSessionID)
+        let run = PendingRun(
+            handle: RunHandle(prompt: prompt),
+            resumeSessionID: resumeSessionID,
+            modelChoice: modelChoice
+        )
         if isProcessing {
             guard pending.count < Self.maxPending else {
                 logger.error("enqueue rejected: queue full (\(Self.maxPending) pending)")
@@ -353,6 +365,15 @@ public actor ClaudeRunner {
     private struct PendingRun: Sendable {
         let handle: RunHandle
         let resumeSessionID: String?
+        /// The ⌘↩ per-run model selection, resolved at spawn against
+        /// `Configuration.model` (see `RunModelChoice.effectiveModel`).
+        let modelChoice: RunModelChoice
+    }
+
+    /// Test hook: the model choice each QUEUED (pending) run carries — pins
+    /// the enqueue → PendingRun pass-through without a full fake-claude run.
+    func pendingModelChoicesForTesting() -> [RunModelChoice] {
+        pending.map(\.modelChoice)
     }
 
     private func startWorker(with first: PendingRun) {
@@ -410,7 +431,13 @@ public actor ClaudeRunner {
         process.arguments = Self.arguments(
             prompt: run.handle.prompt,
             resumeSessionID: run.resumeSessionID,
-            model: configuration.model,
+            // The ⌘↩ per-run choice resolves here — .configured is the
+            // Settings model, .cliDefault drops the flag entirely, .named
+            // overrides for this one run. Effort is untouched by all three.
+            model: RunModelChoice.effectiveModel(
+                choice: run.modelChoice,
+                configured: configuration.model
+            ),
             effort: configuration.effort
         )
         process.currentDirectoryURL = configuration.vault.root // §2.5, never ~ or /

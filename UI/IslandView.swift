@@ -85,6 +85,10 @@ struct IslandView: View {
     /// default, and what --render-preview gets — means picker mode never
     /// renders; previews are unchanged.
     var pickerModel: ResumePickerModel?
+    /// The ⌘↩ per-run model chooser (owned by the window controller). Nil —
+    /// the default, and what --render-preview gets — means chooser mode
+    /// never renders; previews are unchanged.
+    var modelChoiceModel: ModelChoiceModel?
     /// Live-run status (owned by the window controller; AgentRunController
     /// writes the run bookkeeping, the hover machinery writes the hover
     /// flag). Nil — the default, and what --render-preview's bare
@@ -99,6 +103,9 @@ struct IslandView: View {
     var openLayoutModel: OpenLayoutModel?
     /// Picker row click → resume that session (App layer).
     var onPickerSelect: (RunRecord) -> Void
+    /// Chooser row click → submit the current field text with that per-run
+    /// model choice (App layer).
+    var onModelChoiceSelect: (RunModelChoice) -> Void
 
     init(
         state: IslandState,
@@ -106,6 +113,7 @@ struct IslandView: View {
         reduceMotion: Bool = false,
         suggestionModel: SlashSuggestionModel? = nil,
         pickerModel: ResumePickerModel? = nil,
+        modelChoiceModel: ModelChoiceModel? = nil,
         openLayoutModel: OpenLayoutModel? = nil,
         runStatusModel: RunStatusModel? = nil,
         onHoverChanged: @escaping (Bool) -> Void = { _ in },
@@ -116,6 +124,7 @@ struct IslandView: View {
         onCopyCommand: @escaping (ResumeAction) -> Void = { _ in },
         onOpenSettings: @escaping () -> Void = {},
         onPickerSelect: @escaping (RunRecord) -> Void = { _ in },
+        onModelChoiceSelect: @escaping (RunModelChoice) -> Void = { _ in },
         staticRendering: Bool = false
     ) {
         self.state = state
@@ -123,6 +132,7 @@ struct IslandView: View {
         self.reduceMotion = reduceMotion
         self.suggestionModel = suggestionModel
         self.pickerModel = pickerModel
+        self.modelChoiceModel = modelChoiceModel
         self.openLayoutModel = openLayoutModel
         self.runStatusModel = runStatusModel
         self.onHoverChanged = onHoverChanged
@@ -133,6 +143,7 @@ struct IslandView: View {
         self.onCopyCommand = onCopyCommand
         self.onOpenSettings = onOpenSettings
         self.onPickerSelect = onPickerSelect
+        self.onModelChoiceSelect = onModelChoiceSelect
         self.staticRendering = staticRendering
     }
 
@@ -149,6 +160,11 @@ struct IslandView: View {
     /// inside the 200 pt window and clip the bottom row — see
     /// `SlashSuggestionModel.maxVisibleRows`.
     ///
+    /// `openChooserRows` (only meaningful for `.open`) is the ⌘↩ per-run
+    /// model chooser's row count (3 while active, 0 otherwise). The chooser
+    /// replaces the suggestion list (same base height, same 22 pt rows) and
+    /// wins over it; the /resume picker still wins over both — see `openPlan`.
+    ///
     /// `openFieldExtraHeight` (only meaningful for `.open`) is the capture
     /// field's measured wrap growth (`OpenLayoutModel.fieldExtraHeight`); it
     /// grows the shape the same way and WINS the row budget — see `openPlan`.
@@ -160,7 +176,7 @@ struct IslandView: View {
     /// SAME RunStatusModel instance.
     static func shapeSize(
         for state: IslandState, layout: IslandLayout, openSuggestionRows: Int = 0,
-        openPickerRows: Int = 0, openFieldExtraHeight: CGFloat = 0,
+        openPickerRows: Int = 0, openChooserRows: Int = 0, openFieldExtraHeight: CGFloat = 0,
         runningHoverStatus: Bool = false
     ) -> CGSize {
         switch state {
@@ -187,6 +203,7 @@ struct IslandView: View {
                     layout: layout,
                     openSuggestionRows: openSuggestionRows,
                     openPickerRows: openPickerRows,
+                    openChooserRows: openChooserRows,
                     openFieldExtraHeight: openFieldExtraHeight
                 ).height
             )
@@ -243,9 +260,14 @@ struct IslandView: View {
     /// is exactly what lets 5 × 22 pt rows fit inside the constant 200 pt
     /// window (90 + 5 × 22 = 200; the suggestion list's 120 pt base fits
     /// only 4).
+    ///
+    /// The ⌘↩ model chooser comes next: it replaces the suggestion list
+    /// (hint line still shown, so the suggestion list's 120 pt base and
+    /// 22 pt rows apply — 120 + 3 × 22 = 186 fits comfortably) and wins over
+    /// it while active.
     static func openPlan(
         layout: IslandLayout, openSuggestionRows: Int, openPickerRows: Int,
-        openFieldExtraHeight: CGFloat
+        openChooserRows: Int, openFieldExtraHeight: CGFloat
     ) -> (height: CGFloat, rowBudget: Int) {
         let plan = if openPickerRows > 0 {
             OpenIslandLayout.compute(
@@ -253,6 +275,14 @@ struct IslandView: View {
                 requestedRows: min(openPickerRows, ResumePickerModel.maxVisibleRows),
                 rowHeight: ResumePickerList.rowHeight,
                 baseHeight: 90,
+                maxHeight: layout.windowSize.height
+            )
+        } else if openChooserRows > 0 {
+            OpenIslandLayout.compute(
+                fieldExtraHeight: openFieldExtraHeight,
+                requestedRows: min(openChooserRows, ModelChoiceModel.maxVisibleRows),
+                rowHeight: ModelChoiceList.rowHeight,
+                baseHeight: 120,
                 maxHeight: layout.windowSize.height
             )
         } else {
@@ -283,6 +313,15 @@ struct IslandView: View {
         return max(1, pickerModel.visibleRowCount)
     }
 
+    /// > 0 exactly while the ⌘↩ model chooser is active (its 3 fixed rows).
+    /// Reading `visibleRowCount` in body makes SwiftUI re-render (and the
+    /// shape re-size) when the chooser activates or deactivates.
+    private var openChooserRows: Int {
+        guard state == .open, !staticRendering, let modelChoiceModel, modelChoiceModel.isActive
+        else { return 0 }
+        return modelChoiceModel.visibleRowCount
+    }
+
     /// The capture field's measured wrap growth — 0 when not open, in static
     /// previews, or without a layout model (--render-preview's bare
     /// `IslandView(state:)`). Reading it in body makes SwiftUI re-render (and
@@ -308,6 +347,7 @@ struct IslandView: View {
             layout: layout,
             openSuggestionRows: openSuggestionRows,
             openPickerRows: openPickerRows,
+            openChooserRows: openChooserRows,
             openFieldExtraHeight: openFieldExtra,
             runningHoverStatus: runningHoverStatus
         )
@@ -340,6 +380,8 @@ struct IslandView: View {
             // fade) as state changes.
             .animation(IslandMotion.animation(reduceMotion: reduceMotion), value: openSuggestionRows)
             .animation(IslandMotion.animation(reduceMotion: reduceMotion), value: openPickerRows)
+            // …and the ⌘↩ model chooser appearing/disappearing: same spring.
+            .animation(IslandMotion.animation(reduceMotion: reduceMotion), value: openChooserRows)
             // …and the shape growing/shrinking as the capture field wraps
             // onto more or fewer lines uses that same one animation too.
             .animation(IslandMotion.animation(reduceMotion: reduceMotion), value: openFieldExtra)
@@ -374,7 +416,9 @@ struct IslandView: View {
                 restoreInput: captureRestoreInput,
                 suggestionModel: suggestionModel,
                 pickerModel: pickerModel,
+                modelChoiceModel: modelChoiceModel,
                 onPickerSelect: onPickerSelect,
+                onModelChoiceSelect: onModelChoiceSelect,
                 openLayoutModel: openLayoutModel,
                 // The SAME openPlan the shape is drawn from: rows the grown
                 // field's budget no longer covers are not rendered, so the
@@ -383,6 +427,7 @@ struct IslandView: View {
                     layout: layout,
                     openSuggestionRows: openSuggestionRows,
                     openPickerRows: openPickerRows,
+                    openChooserRows: openChooserRows,
                     openFieldExtraHeight: openFieldExtra
                 ).rowBudget
             )

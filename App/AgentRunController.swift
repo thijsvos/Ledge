@@ -69,6 +69,13 @@ final class AgentRunController: AgentRunSubmitting {
     /// completion events). Distinct from `island.liveRun`, which may briefly
     /// hold a provisional handle between Enter and the runner's confirmation.
     private var liveHandle: RunHandle?
+    /// Effective `--model` value per accepted run (keyed by RunHandle.id) —
+    /// the completion path writes it into the history record. Absent key =
+    /// no --model flag (`.cliDefault`, or nothing configured), recorded as
+    /// nil. Populated when the runner accepts an enqueue, drained on
+    /// completion; cleared wholesale on /cancel and runner retirement (those
+    /// runs never reach the completion path).
+    private var effectiveModelByRunID: [UUID: String] = [:]
     /// Reports a submission that was rejected before it ever ran (no vault,
     /// bad vault, no binary, queue full) so CaptureCoordinator can preserve
     /// the typed input — text is never lost to a failure peek.
@@ -157,9 +164,16 @@ final class AgentRunController: AgentRunSubmitting {
         return resolver
     }
 
+    /// The Settings model name the ⌘↩ chooser's "Configured default" row
+    /// shows — the same sanitized read every enqueue snapshots; nil = none
+    /// set (the row's subtitle then says so).
+    func configuredModelName() -> String? {
+        storedModelOverride()
+    }
+
     // MARK: - AgentRunSubmitting
 
-    func submitAgentRun(prompt: String) {
+    func submitAgentRun(prompt: String, modelChoice: RunModelChoice) {
         guard
             let configuredPath = defaults.string(forKey: DefaultsKey.vaultPath),
             !configuredPath.isEmpty
@@ -247,6 +261,12 @@ final class AgentRunController: AgentRunSubmitting {
         let resolver = currentResolver()
         let model = storedModelOverride()
         let effort = storedEffort()
+        // The run's effective --model value (nil = no flag), resolved from
+        // the SAME Enter-time snapshot the runner's Configuration gets — so
+        // what history records is exactly what the spawn site puts in argv.
+        let effectiveModel = RunModelChoice.effectiveModel(
+            choice: modelChoice, configured: model
+        )
         let previousSubmission = submissionChain
         submissionChain = Task { [weak self] in
             // FIFO discipline: this Enter's pipeline starts only after the
@@ -274,9 +294,10 @@ final class AgentRunController: AgentRunSubmitting {
             await retirementDrain?.value
             let enqueued = await runner.enqueue(
                 prompt: prompt,
-                resumeSessionID: resumeChoice.sessionID
+                resumeSessionID: resumeChoice.sessionID,
+                modelChoice: modelChoice
             )
-            handle(enqueued: enqueued, prompt: prompt)
+            handle(enqueued: enqueued, prompt: prompt, effectiveModel: effectiveModel)
         }
     }
 
@@ -520,12 +541,17 @@ final class AgentRunController: AgentRunSubmitting {
         guard let previous = runner else { return }
         let cancelledPrompt = liveHandle?.prompt
         let cancelledVaultPath = runnerVaultPath
+        // The cancelled run's effective model, read before the bookkeeping
+        // clears (the whole map dies with the runner — its queued runs never
+        // reach the completion path).
+        let cancelledModel = liveHandle.flatMap { effectiveModelByRunID[$0.id] }
         eventsTask?.cancel()
         eventsTask = nil
         island.clearLiveRun()
         runStatus.clear()
         liveHandle = nil
         queueDepth = 0
+        effectiveModelByRunID = [:]
         runner = nil
         runnerVaultPath = nil
         runnerBinaryPath = nil
@@ -546,6 +572,7 @@ final class AgentRunController: AgentRunSubmitting {
                     vaultPath: vaultPath,
                     prompt: prompt,
                     sessionID: sessionID,
+                    model: cancelledModel,
                     outcome: .cancelled,
                     editedFiles: [],
                     durationMS: nil,
@@ -627,6 +654,9 @@ final class AgentRunController: AgentRunSubmitting {
             runStatus.clear()
             liveHandle = nil
             queueDepth = 0
+            // The retired runner's runs never reach the completion path; its
+            // effective-model bookkeeping dies with it.
+            effectiveModelByRunID = [:]
             retiredRunners.append(previous)
             let previousDrain = retirementDrain
             retirementDrain = Task.detached { [weak self] in
@@ -682,11 +712,17 @@ final class AgentRunController: AgentRunSubmitting {
                 : "\(count) queued prompts dropped — vault or binary changed"))
     }
 
-    private func handle(enqueued: Enqueued, prompt: String) {
+    private func handle(enqueued: Enqueued, prompt: String, effectiveModel: String?) {
         switch enqueued {
         case let .started(handle):
+            if let effectiveModel {
+                effectiveModelByRunID[handle.id] = effectiveModel
+            }
             showRunning(handle)
-        case let .queued(_, position):
+        case let .queued(handle, position):
+            if let effectiveModel {
+                effectiveModelByRunID[handle.id] = effectiveModel
+            }
             showPeek(.queued(position: position))
         case let .rejected(reason):
             rejectAsync(
@@ -743,6 +779,9 @@ final class AgentRunController: AgentRunSubmitting {
     /// are logged (category "runner"), never surfaced — the history must
     /// never turn a successful run into a failure peek.
     private func recordHistory(for completion: RunCompletion) {
+        // Drained unconditionally (even if the vault guard below bails): the
+        // run is over either way. Absent key = no --model flag → nil.
+        let model = effectiveModelByRunID.removeValue(forKey: completion.handle.id)
         guard let vaultPath = runnerVaultPath else { return }
         let record = switch completion.outcome {
         case let .success(summary):
@@ -752,6 +791,7 @@ final class AgentRunController: AgentRunSubmitting {
                 vaultPath: vaultPath,
                 prompt: completion.handle.prompt,
                 sessionID: summary.sessionID,
+                model: model,
                 outcome: .success,
                 editedFiles: summary.editedFiles,
                 durationMS: summary.durationMS,
@@ -765,6 +805,7 @@ final class AgentRunController: AgentRunSubmitting {
                 vaultPath: vaultPath,
                 prompt: completion.handle.prompt,
                 sessionID: failure.sessionID,
+                model: model,
                 outcome: .failure(reason: Self.headline(for: failure)),
                 editedFiles: [],
                 durationMS: nil,

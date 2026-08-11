@@ -50,6 +50,11 @@ public struct RunRecord: Codable, Equatable, Sendable {
     /// before it is ever interpolated anywhere (the picker model filters on
     /// exactly that validity).
     public var sessionID: String?
+    /// The effective `--model` value the run's argv carried; nil when no
+    /// --model flag was passed (the user's own Claude Code default did the
+    /// work). Additive field — synthesized Codable decodes it with
+    /// `decodeIfPresent`, so pre-field JSONL lines still decode (tested).
+    public var model: String?
     public var outcome: Outcome
     public var editedFiles: [String]
     public var durationMS: Int?
@@ -63,6 +68,7 @@ public struct RunRecord: Codable, Equatable, Sendable {
         vaultPath: String,
         prompt: String,
         sessionID: String?,
+        model: String? = nil,
         outcome: Outcome,
         editedFiles: [String],
         durationMS: Int?,
@@ -74,6 +80,7 @@ public struct RunRecord: Codable, Equatable, Sendable {
         self.vaultPath = vaultPath
         self.prompt = prompt
         self.sessionID = sessionID
+        self.model = model
         self.outcome = outcome
         self.editedFiles = editedFiles
         self.durationMS = durationMS
