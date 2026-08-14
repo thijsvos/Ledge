@@ -220,6 +220,7 @@ final class NotchWindowController: NSObject {
                 self?.agentRunController.presentResumePicker()
             },
             cancelRuns: { [weak self] in self?.agentRunController.cancelAllRuns() },
+            undoLastRun: { [weak self] in self?.agentRunController.undoLastRun() },
             // The existing shutdown path (applicationWillTerminate →
             // teardown) SIGTERMs any live child.
             quit: { NSApp.terminate(nil) }

@@ -42,6 +42,15 @@ final class AgentRunController: AgentRunSubmitting {
     private var resolverOverridePath: String?
     private var runner: ClaudeRunner?
     private var runnerVaultPath: String?
+    /// The validated vault the current runner writes into. Held so the
+    /// completion path can apply the returned edit plan without re-validating
+    /// a path the submission already proved.
+    private var runnerVault: Vault?
+    /// The last applied run's pre-images, for `/undo`. One slot, because §2.4
+    /// allows one run per vault at a time. Deliberately in memory only: undo
+    /// is an "oops, immediately" affordance, and a record that outlived the
+    /// app would invite undoing a run the vault has moved well past.
+    private var lastUndo: (record: RunUndoRecord, vaultPath: String)?
     private var runnerBinaryPath: String?
     private var runnerModel: String?
     private var runnerEffort: String?
@@ -554,6 +563,10 @@ final class AgentRunController: AgentRunSubmitting {
         effectiveModelByRunID = [:]
         runner = nil
         runnerVaultPath = nil
+        runnerVault = nil
+        // The applied run belonged to the runner being torn down; keeping its
+        // pre-images would let /undo write into whatever vault comes next.
+        lastUndo = nil
         runnerBinaryPath = nil
         runnerModel = nil
         runnerEffort = nil
@@ -675,6 +688,7 @@ final class AgentRunController: AgentRunSubmitting {
         ))
         runner = created
         runnerVaultPath = vaultPath
+        runnerVault = vault
         runnerBinaryPath = binaryPath
         runnerModel = model
         runnerEffort = effort
@@ -745,7 +759,10 @@ final class AgentRunController: AgentRunSubmitting {
     }
 
     private func handle(completion: RunCompletion) {
-        recordHistory(for: completion)
+        // Before recordHistory, because the record's editedFiles must be what
+        // Ledge actually wrote rather than what the agent asked for.
+        let plan = planOutcome(for: completion.outcome)
+        recordHistory(for: completion, plan: plan)
         liveHandle = nil
         // The finished run's hover-chip status dies with it; when depth > 0
         // the next run's runStarted repopulates the model immediately.
@@ -759,17 +776,79 @@ final class AgentRunController: AgentRunSubmitting {
         switch completion.outcome {
         case let .success(summary):
             persistSessionID(summary.sessionID)
-            showPeek(.success(
-                filesEdited: summary.editedFiles.count,
-                duration: Double(summary.durationMS ?? 0) / 1000
-            ))
+            showPlanPeek(summary: summary, plan: plan)
         case let .failure(failure):
             persistSessionID(failure.sessionID)
-            let resume = failure.sessionID.flatMap { sessionID -> ResumeAction? in
-                guard let vaultPath = runnerVaultPath else { return nil }
-                return ResumeAction(vaultPath: vaultPath, sessionID: sessionID)
-            }
-            showPeek(.failure(message: Self.message(for: failure), resume: resume))
+            showPeek(.failure(
+                message: Self.message(for: failure),
+                resume: resumeAction(sessionID: failure.sessionID)
+            ))
+        }
+    }
+
+    // MARK: - Edit plans (§2.3 — the agent reports, Ledge writes)
+
+    /// Reads the run's reply and applies the edit plan it carries. Nil for a
+    /// failed run: there is no reply to read a plan out of.
+    ///
+    /// Synchronous on purpose. The validator caps a plan at 20 files and 1 MB,
+    /// this runs once at the end of a ~20 s run (never on a §10 hot path), and
+    /// applying it off-main would open a window where the run reports finished
+    /// before the vault reflects it.
+    private func planOutcome(for outcome: RunOutcome) -> PlanApplication.Outcome? {
+        guard case let .success(summary) = outcome else { return nil }
+        guard let vault = runnerVault else {
+            return .refused(reason: "The vault is no longer available")
+        }
+        let result = PlanApplication.apply(finalMessage: summary.resultText, in: vault)
+        if case let .applied(applied) = result, !applied.isEmpty,
+           let vaultPath = runnerVaultPath
+        {
+            lastUndo = (record: applied.undo, vaultPath: vaultPath)
+        }
+        return result
+    }
+
+    private func showPlanPeek(summary: RunSummary, plan: PlanApplication.Outcome?) {
+        let duration = Double(summary.durationMS ?? 0) / 1000
+        switch plan {
+        case let .applied(applied):
+            showPeek(.success(filesEdited: applied.filesChanged.count, duration: duration))
+        case .nothingToChange:
+            showPeek(.info(message: "Nothing to change"))
+        case let .refused(reason):
+            // The RUN succeeded — the plan is what failed. Keep the agent's
+            // own words alongside the reason so nothing it produced is lost
+            // to a one-line refusal.
+            showPeek(.failure(
+                message: Self.planRefusalMessage(reason: reason, summary: summary),
+                resume: resumeAction(sessionID: summary.sessionID)
+            ))
+        case nil:
+            showPeek(.success(filesEdited: 0, duration: duration))
+        }
+    }
+
+    /// Reverses the last applied run. One slot (§2.4: one run per vault), and
+    /// only while the vault has not been switched out from under it.
+    func undoLastRun() {
+        guard let lastUndo else {
+            return showPeek(.info(message: "Nothing to undo"))
+        }
+        guard lastUndo.vaultPath == runnerVaultPath else {
+            self.lastUndo = nil
+            return showPeek(.info(message: "Nothing to undo in this vault"))
+        }
+        let restored = RunUndo.restore(lastUndo.record)
+        self.lastUndo = nil
+        logger.info("undid last run: \(restored) file(s) restored")
+        showPeek(.info(message: "Undone — \(restored) file\(restored == 1 ? "" : "s") restored"))
+    }
+
+    private func resumeAction(sessionID: String?) -> ResumeAction? {
+        sessionID.flatMap { sessionID -> ResumeAction? in
+            guard let vaultPath = runnerVaultPath else { return nil }
+            return ResumeAction(vaultPath: vaultPath, sessionID: sessionID)
         }
     }
 
@@ -778,7 +857,7 @@ final class AgentRunController: AgentRunSubmitting {
     /// Builds and appends the history record for a completed run. Failures
     /// are logged (category "runner"), never surfaced — the history must
     /// never turn a successful run into a failure peek.
-    private func recordHistory(for completion: RunCompletion) {
+    private func recordHistory(for completion: RunCompletion, plan: PlanApplication.Outcome?) {
         // Drained unconditionally (even if the vault guard below bails): the
         // run is over either way. Absent key = no --model flag → nil.
         let model = effectiveModelByRunID.removeValue(forKey: completion.handle.id)
@@ -793,7 +872,15 @@ final class AgentRunController: AgentRunSubmitting {
                 sessionID: summary.sessionID,
                 model: model,
                 outcome: .success,
-                editedFiles: summary.editedFiles,
+                // What Ledge wrote, not what the agent asked for. A refused
+                // plan changed nothing, so it records nothing.
+                editedFiles: {
+                    if case let .applied(applied) = plan {
+                        applied.filesChanged.map(\.path)
+                    } else {
+                        []
+                    }
+                }(),
                 durationMS: summary.durationMS,
                 resultExcerpt: summary.resultText, // init truncates to 500
                 stderrTail: []
@@ -947,6 +1034,18 @@ final class AgentRunController: AgentRunSubmitting {
         case let .spawnFailed(detail):
             "Couldn't launch Claude: \(detail)"
         }
+    }
+
+    /// The run worked; its plan did not. Reason first, then what the agent
+    /// actually said (trimmed) — a refusal that hid the reply would look like
+    /// a bad model day rather than a rule Ledge enforced.
+    private static func planRefusalMessage(reason: String, summary: RunSummary) -> String {
+        var lines = ["Run finished, but no changes were made", reason]
+        let reply = summary.resultText?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !reply.isEmpty {
+            lines.append(String(reply.prefix(200)))
+        }
+        return lines.joined(separator: "\n")
     }
 
     private static func message(for failure: RunFailure) -> String {

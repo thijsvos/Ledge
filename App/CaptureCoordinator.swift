@@ -37,6 +37,7 @@ struct NativeCommandActions {
     var revealVault: () -> Void = {}
     var resumeLastSession: () -> Void = {}
     var cancelRuns: () -> Void = {}
+    var undoLastRun: () -> Void = {}
     var quit: () -> Void = {}
 }
 
@@ -167,6 +168,8 @@ final class CaptureCoordinator {
             nativeActions.resumeLastSession()
         case .cancel:
             nativeActions.cancelRuns()
+        case .undo:
+            nativeActions.undoLastRun()
         case .quit:
             nativeActions.quit()
         }

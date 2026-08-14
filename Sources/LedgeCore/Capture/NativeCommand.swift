@@ -24,6 +24,7 @@ public enum NativeCommand: String, CaseIterable, Sendable {
     case vault
     case resume
     case cancel
+    case undo
     case quit
 
     /// The command name WITHOUT the leading slash (the raw value).
@@ -40,6 +41,7 @@ public enum NativeCommand: String, CaseIterable, Sendable {
         case .vault: "Reveal the vault in Finder"
         case .resume: "Resume a recent agent session in Terminal"
         case .cancel: "Cancel the running agent run (and queued ones)"
+        case .undo: "Undo the last agent run's changes"
         case .quit: "Quit Ledge"
         }
     }

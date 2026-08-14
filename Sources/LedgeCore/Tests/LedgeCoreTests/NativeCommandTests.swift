@@ -15,7 +15,7 @@ final class NativeCommandTests: XCTestCase {
         // suggestion list shows exactly this, not alphabetical).
         XCTAssertEqual(
             NativeCommand.allCases.map(\.name),
-            ["help", "settings", "checks", "vault", "resume", "cancel", "quit"]
+            ["help", "settings", "checks", "vault", "resume", "cancel", "undo", "quit"]
         )
     }
 
