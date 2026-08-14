@@ -542,4 +542,114 @@ final class ClaudeRunnerTests: XCTestCase {
             return XCTFail("expected invalidVault rejection")
         }
     }
+
+    // MARK: - What the child actually received
+
+    /// testExactSpawnArguments pins what the BUILDER returns. This pins what
+    /// the child process was handed, which is the thing that actually matters
+    /// and which nothing asserted before — the fixture used to ignore "$@"
+    /// entirely, so dropping process.arguments would have passed every test.
+    func testChildReceivesExactlyTheArgvWeBuilt() async throws {
+        let argvFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ledge-argv-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: argvFile) }
+
+        let runner = try makeRunner(
+            mode: "argvcheck",
+            pollute: ["FAKE_CLAUDE_ARGV_OUT": argvFile.path]
+        )
+        _ = await runner.enqueue(prompt: "file my note")
+        _ = try await firstCompletion(from: runner.events)
+
+        // NUL-separated: the prompt legitimately contains newlines.
+        let received = try Data(contentsOf: argvFile)
+            .split(separator: 0)
+            .map { String(decoding: $0, as: UTF8.self) }
+        let expected = ClaudeRunner.arguments(prompt: "file my note", resumeSessionID: nil)
+
+        XCTAssertEqual(received.count, expected.count)
+        // Every flag, byte for byte…
+        XCTAssertEqual(Array(received.dropFirst(2)), Array(expected.dropFirst(2)))
+        // …and the prompt, compared loosely because the contract embeds
+        // today's date and the run could straddle UTC midnight.
+        XCTAssertEqual(received.first, "-p")
+        XCTAssertEqual(received.count > 1, true)
+        XCTAssertTrue(received[1].hasSuffix("file my note"))
+        XCTAssertTrue(received[1].contains("\"edits\""))
+    }
+
+    // MARK: - Edit plans end to end (§2.3)
+
+    func testPlanFromTheAgentIsAppliedToTheVault() async throws {
+        let vaultRoot = try Fixtures.makeTempVaultCopy()
+        defer { try? FileManager.default.removeItem(at: vaultRoot) }
+
+        let runner = try makeRunner(mode: "plan", vaultRoot: vaultRoot)
+        _ = await runner.enqueue(prompt: "log it")
+        let completion = try await firstCompletion(from: runner.events)
+        guard case let .success(summary) = completion.outcome else {
+            return XCTFail("expected success, got \(completion.outcome)")
+        }
+
+        let outcome = try PlanApplication.apply(
+            finalMessage: summary.resultText, in: Vault(root: vaultRoot)
+        )
+        guard case let .applied(applied) = outcome else {
+            return XCTFail("expected applied, got \(outcome)")
+        }
+        XCTAssertEqual(applied.filesChanged.map(\.lastPathComponent), ["2026-08-07.md"])
+        let daily = try String(
+            contentsOf: vaultRoot.appendingPathComponent("daily/2026-08-07.md"), encoding: .utf8
+        )
+        XCTAssertTrue(daily.hasSuffix("- 09:15Z from the fake agent\n"), daily)
+    }
+
+    func testFencedPlanWrappedInProseIsApplied() async throws {
+        let vaultRoot = try Fixtures.makeTempVaultCopy()
+        defer { try? FileManager.default.removeItem(at: vaultRoot) }
+
+        let runner = try makeRunner(mode: "planfenced", vaultRoot: vaultRoot)
+        _ = await runner.enqueue(prompt: "file it")
+        let completion = try await firstCompletion(from: runner.events)
+        guard case let .success(summary) = completion.outcome else {
+            return XCTFail("expected success, got \(completion.outcome)")
+        }
+
+        guard case .applied = try PlanApplication.apply(
+            finalMessage: summary.resultText, in: Vault(root: vaultRoot)
+        ) else {
+            return XCTFail("expected applied")
+        }
+        XCTAssertEqual(
+            try String(
+                contentsOf: vaultRoot.appendingPathComponent("notes/fenced.md"), encoding: .utf8
+            ),
+            "# Fenced"
+        )
+    }
+
+    /// The whole point of the fence: a plan naming a path outside the vault
+    /// is refused, and nothing is written anywhere.
+    func testEscapingPlanFromTheAgentIsRefusedAndWritesNothing() async throws {
+        let vaultRoot = try Fixtures.makeTempVaultCopy()
+        defer { try? FileManager.default.removeItem(at: vaultRoot) }
+        let escapeTarget = vaultRoot.deletingLastPathComponent()
+            .appendingPathComponent("escape.md")
+
+        let runner = try makeRunner(mode: "planbad", vaultRoot: vaultRoot)
+        _ = await runner.enqueue(prompt: "escape")
+        let completion = try await firstCompletion(from: runner.events)
+        guard case let .success(summary) = completion.outcome else {
+            return XCTFail("expected the RUN to succeed — the plan is what fails")
+        }
+
+        let outcome = try PlanApplication.apply(
+            finalMessage: summary.resultText, in: Vault(root: vaultRoot)
+        )
+        guard case let .refused(reason) = outcome else {
+            return XCTFail("expected refused, got \(outcome)")
+        }
+        XCTAssertTrue(reason.contains("climbs out of the vault"), reason)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: escapeTarget.path))
+    }
 }
