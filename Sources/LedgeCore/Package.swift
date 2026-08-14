@@ -11,7 +11,7 @@ let package = Package(
         .target(
             name: "LedgeCore",
             path: ".",
-            sources: ["Geometry", "StateMachine", "Capture", "Runner", "Vault", "Support"]
+            sources: ["Geometry", "StateMachine", "Capture", "Runner", "Vault", "Plan", "Support"]
         ),
         // Documented deviation from §3's layout diagram (which draws
         // Tests/LedgeCoreTests at the repo root): SPM forbids target paths
