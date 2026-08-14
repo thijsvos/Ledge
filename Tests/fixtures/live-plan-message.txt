@@ -1,0 +1,14 @@
+**Vault contents:** two files, both effectively empty scaffolds.
+
+- `daily/2026-08-14.md` — today's daily note, has a `## Log` heading with no entries yet
+- `notes/index.md` — has an `## Open` heading, also empty
+
+No existing entries, so there's no established formatting convention to match. I'm using the `- HH:MMZ <text>` shape from your example, which fits the vault's UTC convention.
+
+**What should change:** one line appended under `## Log` in today's daily note. I'm not touching `notes/index.md` — `## Open` reads like a list of open items/threads, and a completed meeting log isn't one. If you'd rather have kickoff tracked as an open workstream there, say so and I'll add it.
+
+```json
+{"edits": [
+  {"op": "append", "path": "daily/2026-08-14.md", "text": "- 09:15Z Met Sam about the kickoff\n"}
+]}
+```

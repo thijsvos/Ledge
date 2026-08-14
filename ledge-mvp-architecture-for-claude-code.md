@@ -29,7 +29,9 @@ These exist to keep the user's Claude subscription unambiguously within Anthropi
 
 1. **Official CLI only.** Ledge invokes the user's installed `claude` binary as a child process. Ledge must NEVER read, copy, store, or transmit OAuth tokens, credentials files, or anything under `~/.claude` related to auth; never call Anthropic HTTP endpoints; never embed an API key or offer a field to enter one.
 2. **Environment sanitization.** The child process environment is the inherited environment with `ANTHROPIC_API_KEY` removed, so a key exported in the user's shell can never cause accidental API billing. Assert this in a unit test.
-3. **Read/edit only agent.** Headless runs use `--allowedTools "Read,Write,Edit,Glob,Grep"` — no `Bash`, no `WebSearch`, no network or command execution. With editing pre-approved via `--permission-mode acceptEdits` and `--max-turns 6`, the blast radius of an unattended run is "some markdown files in one folder changed", which git makes reversible.
+3. **Read-only agent; Ledge performs every write.** Headless runs use `--allowedTools "Read,Glob,Grep"` plus an explicit `--disallowedTools "Write,Edit,MultiEdit,NotebookEdit,Bash,WebSearch,WebFetch"` — no writing, no command execution, no network. The agent explores the vault and returns an **edit plan** (`Plan/EditPlan.swift`); Ledge checks it against the vault fence (`Vault.resolve(relativePath:)`) and applies it (`Plan/EditPlanApplier.swift`). `--max-turns 6` still bounds the exploration.
+
+   This *narrows* the old rule rather than replacing it. Previously the blast radius was "some markdown files in one folder changed" because Claude's flags said so; now it is that because Ledge's own code refuses anything else, with tests against it — paths outside the vault, dotfiles (a plan must never author `.claude/commands/*.md`), non-`.md` files, more than 20 edits, or more than 1 MB of new material. There is no delete operation, and every run keeps pre-images so `/undo` can reverse it.
 4. **One run at a time per vault** (serialized queue). Concurrent agent edits race each other and the vault's git checkpointing.
 5. **Working directory is always the vault**, never `~`, never `/`. Refuse to run if the configured vault path doesn't exist or isn't a directory.
 
@@ -131,12 +133,18 @@ All mutations go through `IslandController.transition(to:)` (`@MainActor`), whic
 **Invocation** (working directory = vault; environment = inherited minus `ANTHROPIC_API_KEY`):
 
 ```
-claude -p "<prompt>" \
+claude -p "<edit-plan contract + prompt>" \
   --output-format stream-json \
-  --allowedTools "Read,Write,Edit,Glob,Grep" \
-  --permission-mode acceptEdits \
-  --max-turns 6
+  --verbose \
+  --allowedTools "Read,Glob,Grep" \
+  --disallowedTools "Write,Edit,MultiEdit,NotebookEdit,Bash,WebSearch,WebFetch" \
+  --max-turns 6 \
+  --strict-mcp-config
 ```
+
+`--permission-mode acceptEdits` is deliberately absent: with no edit tools there is nothing to accept, and leaving it would be a lie in the argv. Live-probed against claude 2.1.226 — exit 0, no prompt, no stall, `Glob`/`Read` only.
+
+The prompt is the user's request wrapped in the edit-plan contract (`Plan/PlanContract.swift`), which also states today's date in **UTC** — the CLI injects its own *local* date, which names the wrong daily note for anyone west of UTC after 00:00Z. The contract travels in the prompt rather than in the vault's `CLAUDE.md` so Ledge works against a vault with no agent config at all.
 
 Append `--resume <sessionID>` only when the user tapped "continue last" (last session ID stored per vault in UserDefaults). Default is a fresh session per request — the vault plus its `CLAUDE.md` contract is the memory; fresh sessions are faster and can't accumulate drift.
 
@@ -148,7 +156,9 @@ Append `--resume <sessionID>` only when the user tapped "continue last" (last se
 {"type":"result","subtype":"success","session_id":"…","duration_ms":34210,"num_turns":4,"total_cost_usd":0.0,"result":"…"}
 ```
 
-Extract: `session_id` (persist), assistant text (kept for a detail view), the set of `file_path`s from Write/Edit tool_use blocks ("N files edited"), duration, and final result text. Parser is unit-tested against both `live-probe.ndjson` and `fake-claude.sh` output.
+Extract: `session_id` (persist), assistant text (kept for a detail view), duration, and final result text. Parser is unit-tested against both `live-probe.ndjson` and `fake-claude.sh` output.
+
+"N files edited" comes from what Ledge actually wrote (`AppliedPlan.filesChanged`), not from Write/Edit `tool_use` blocks — those tools are denied now, so the stream can no longer report them and the count would always be zero.
 
 **Lifecycle & failure:**
 * Timeout: 120 s wall clock → SIGTERM, then SIGKILL after 5 s → failure peek.

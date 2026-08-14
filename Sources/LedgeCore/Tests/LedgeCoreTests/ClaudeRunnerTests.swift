@@ -116,18 +116,27 @@ final class ClaudeRunnerTests: XCTestCase {
 
     // MARK: - Invocation contract
 
+    /// A fixed instant so the contract's injected UTC date is stable.
+    private static let fixedNow = utcDate("2026-08-14T09:15:00Z")
+
     /// The exact argv (§2.3/§6 + live-probe findings): --verbose is required
-    /// with print-mode stream-json; tools exactly Read,Write,Edit,Glob,Grep;
-    /// --resume appended ONLY when a session ID is passed.
+    /// with print-mode stream-json; the agent is read-only; --resume appended
+    /// ONLY when a session ID is passed.
     func testExactSpawnArguments() {
+        let args = ClaudeRunner.arguments(
+            prompt: "file my note", resumeSessionID: nil, now: Self.fixedNow
+        )
+        // The prompt is the edit-plan contract wrapped around the user's words…
+        XCTAssertEqual(args[0], "-p")
+        XCTAssertEqual(args[1], PlanContract.wrap(prompt: "file my note", now: Self.fixedNow))
+        // …and every flag after it is pinned byte for byte.
         XCTAssertEqual(
-            ClaudeRunner.arguments(prompt: "file my note", resumeSessionID: nil),
+            Array(args.dropFirst(2)),
             [
-                "-p", "file my note",
                 "--output-format", "stream-json",
                 "--verbose",
-                "--allowedTools", "Read,Write,Edit,Glob,Grep",
-                "--permission-mode", "acceptEdits",
+                "--allowedTools", "Read,Glob,Grep",
+                "--disallowedTools", "Write,Edit,MultiEdit,NotebookEdit,Bash,WebSearch,WebFetch",
                 "--max-turns", "6",
                 "--strict-mcp-config",
             ]
@@ -138,20 +147,56 @@ final class ClaudeRunnerTests: XCTestCase {
         )
     }
 
+    /// §2.3 narrowed: Ledge performs every write, so the agent has no tool
+    /// that can touch the vault. Named in both directions — the allowlist
+    /// omits them and the denylist names them — so the invocation stays safe
+    /// even if a future CLI changes how an omitted tool is treated.
+    func testAgentHasNoWriteCapability() {
+        let args = ClaudeRunner.arguments(prompt: "p", resumeSessionID: nil)
+
+        guard let allowIndex = args.firstIndex(of: "--allowedTools") else {
+            return XCTFail("--allowedTools missing")
+        }
+        XCTAssertEqual(args[allowIndex + 1], "Read,Glob,Grep")
+
+        guard let denyIndex = args.firstIndex(of: "--disallowedTools") else {
+            return XCTFail("--disallowedTools missing")
+        }
+        let denied = Set(args[denyIndex + 1].split(separator: ",").map(String.init))
+        for tool in ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"] {
+            XCTAssertTrue(denied.contains(tool), "\(tool) must be denied")
+        }
+
+        // With no edit tools there is nothing to accept, so the flag is gone
+        // rather than left behind saying something untrue.
+        XCTAssertFalse(args.contains("--permission-mode"))
+        XCTAssertFalse(args.contains("acceptEdits"))
+    }
+
     func testModelAndEffortOverridesAppendAfterThePinnedInvocation() {
+        let baseline = ClaudeRunner.arguments(
+            prompt: "p", resumeSessionID: nil, now: Self.fixedNow
+        )
         let args = ClaudeRunner.arguments(
-            prompt: "p", resumeSessionID: "abc-123", model: "sonnet", effort: "high"
+            prompt: "p", resumeSessionID: "abc-123",
+            model: "sonnet", effort: "high", now: Self.fixedNow
         )
-        // The §2.3 sandbox prefix is untouched…
-        XCTAssertEqual(
-            Array(args.prefix(12)),
-            ClaudeRunner.arguments(prompt: "p", resumeSessionID: nil)
-        )
+        // The §2.3 sandbox prefix is untouched. Derived from the baseline
+        // rather than hard-coded, so adding a flag cannot silently shift it.
+        XCTAssertEqual(Array(args.prefix(baseline.count)), baseline)
         // …and the overrides slot in before --resume.
         XCTAssertEqual(
             Array(args.suffix(6)),
             ["--model", "sonnet", "--effort", "high", "--resume", "abc-123"]
         )
+    }
+
+    /// The user's own words survive the wrapping — a contract that swallowed
+    /// the request would fail silently and look like a bad model day.
+    func testPromptCarriesTheUsersWordsAndTheContract() {
+        let args = ClaudeRunner.arguments(prompt: "file my note", resumeSessionID: nil)
+        XCTAssertTrue(args[1].hasSuffix("file my note"))
+        XCTAssertTrue(args[1].contains("\"edits\""))
     }
 
     func testOverrideSanitizerDropsEmptyWhitespaceAndFlagLikeValues() {

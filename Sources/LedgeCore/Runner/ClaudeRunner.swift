@@ -289,20 +289,30 @@ public actor ClaudeRunner {
 
     /// The exact argv (after the binary path). Public so tests pin it —
     /// `--verbose` is REQUIRED with print-mode stream-json (live-probe
-    /// finding) and the tool list is exactly §2.3's. `model`/`effort` only
-    /// select which model does the work — they never widen the §2.3 sandbox.
+    /// finding). `model`/`effort` only select which model does the work —
+    /// they never widen the §2.3 sandbox.
+    ///
+    /// The agent is read-only: it reports an edit plan and Ledge performs
+    /// every write (see PlanContract, EditPlanApplier). That NARROWS §2.3 —
+    /// Write and Edit are gone from the allowlist and named again in an
+    /// explicit denylist, so the invocation stays safe even if a future CLI
+    /// changes how an omitted tool is treated. `--permission-mode acceptEdits`
+    /// went with them: with no edit tools there is nothing to accept, and
+    /// leaving it would be a lie in the argv. Live-probed against claude
+    /// 2.1.226 — exit 0, no prompt, no stall, Glob/Read only.
     public static func arguments(
         prompt: String,
         resumeSessionID: String?,
         model: String? = nil,
-        effort: String? = nil
+        effort: String? = nil,
+        now: Date = Date()
     ) -> [String] {
         var args = [
-            "-p", prompt,
+            "-p", PlanContract.wrap(prompt: prompt, now: now),
             "--output-format", "stream-json",
             "--verbose",
-            "--allowedTools", "Read,Write,Edit,Glob,Grep",
-            "--permission-mode", "acceptEdits",
+            "--allowedTools", "Read,Glob,Grep",
+            "--disallowedTools", "Write,Edit,MultiEdit,NotebookEdit,Bash,WebSearch,WebFetch",
             "--max-turns", "6",
             // With no --mcp-config given, strict mode connects ZERO MCP
             // servers: note-work never needs them, the user's configured

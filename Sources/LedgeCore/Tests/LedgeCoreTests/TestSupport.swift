@@ -29,6 +29,14 @@ enum Fixtures {
         fixturesDir.appendingPathComponent("live-probe.ndjson")
     }
 
+    /// A real final message from claude 2.1.226 answering the edit-plan
+    /// contract: prose, then the plan in a fenced block. Captured so the
+    /// extractor is pinned against what the CLI actually produces, not
+    /// against what we imagine it produces.
+    static var livePlanMessage: URL {
+        fixturesDir.appendingPathComponent("live-plan-message.txt")
+    }
+
     /// Copies the committed fixture vault into a fresh temp directory. Tests
     /// mutate the copy freely; the committed fixtures are NEVER touched.
     /// Callers remove the returned directory in tearDown.

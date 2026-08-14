@@ -124,6 +124,23 @@ final class EditPlanExtractorTests: XCTestCase {
         }
     }
 
+    // MARK: - Against the real CLI
+
+    /// A captured final message from claude 2.1.226 answering the contract:
+    /// several paragraphs of reasoning, then the plan in a fenced block. This
+    /// pins the extractor against what the CLI actually produces rather than
+    /// against what we imagine it produces.
+    func testExtractsFromRealCLIOutput() throws {
+        let message = try String(contentsOf: Fixtures.livePlanMessage, encoding: .utf8)
+        XCTAssertEqual(
+            try EditPlanExtractor.extract(from: message).edits,
+            [.append(
+                path: "daily/2026-08-14.md",
+                text: "- 09:15Z Met Sam about the kickoff\n"
+            )]
+        )
+    }
+
     // MARK: - Scanner internals
 
     func testBalancedObjectsFindsNestedAndSequentialObjects() {
