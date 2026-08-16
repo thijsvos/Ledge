@@ -142,6 +142,16 @@ final class AgentRunController: AgentRunSubmitting {
     }
 
     /// The §7 Settings binary override; empty string = unset.
+    /// The vault Settings points at RIGHT NOW, normalized exactly as
+    /// `submitAgentRun` normalizes it so the two are comparable. Nil when no
+    /// vault is configured.
+    private func configuredVaultPath() -> String? {
+        guard let configured = defaults.string(forKey: DefaultsKey.vaultPath),
+              !configured.isEmpty
+        else { return nil }
+        return (configured as NSString).expandingTildeInPath
+    }
+
     private static func storedOverride(in defaults: UserDefaults) -> String? {
         defaults.string(forKey: DefaultsKey.claudeBinaryPath)
             .flatMap { $0.isEmpty ? nil : $0 }
@@ -862,7 +872,14 @@ final class AgentRunController: AgentRunSubmitting {
         guard let lastUndo else {
             return userPeek(.info(message: "Nothing to undo"))
         }
-        guard lastUndo.vaultPath == runnerVaultPath else {
+        // Against the CONFIGURED vault, not `runnerVaultPath`. The latter is
+        // only assigned when a run is submitted (`ensureRunner`), so comparing
+        // to it meant switching vaults in Settings never tripped this guard —
+        // the record stayed live until something else ran. Human QA hit exactly
+        // that. Nothing unsafe followed (undo restores through absolute URLs, so
+        // it writes back into the vault the run happened in), but the refusal a
+        // user was promised never appeared.
+        guard lastUndo.vaultPath == configuredVaultPath() else {
             self.lastUndo = nil
             return userPeek(.info(message: "Nothing to undo in this vault"))
         }
