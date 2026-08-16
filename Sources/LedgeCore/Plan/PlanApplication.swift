@@ -24,7 +24,7 @@ public enum PlanApplication {
     /// it to `vault`. Never throws: every failure is an `Outcome` the caller
     /// reports, because a run that produced text must never disappear into an
     /// unhandled error.
-    public static func apply(finalMessage: String?, in vault: Vault) -> Outcome {
+    public static func apply(finalMessage: String?, in vault: Vault, now: Date = Date()) -> Outcome {
         let logger = Logger(subsystem: "app.ledge", category: "runner")
 
         guard let finalMessage,
@@ -43,8 +43,12 @@ public enum PlanApplication {
 
         guard !plan.isEmpty else { return .nothingToChange }
 
+        // Ledge mints every note's ULID — the agent only marks where one goes.
+        // Before validation, so the caps count the bytes actually written.
+        let stamped = PlanContract.fillingIdentifiers(in: plan, now: now)
+
         do {
-            let validated = try EditPlanValidator.validate(plan, in: vault)
+            let validated = try EditPlanValidator.validate(stamped, in: vault)
             return try .applied(EditPlanApplier.apply(validated))
         } catch {
             logger.error("edit plan refused: \(describe(error), privacy: .public)")

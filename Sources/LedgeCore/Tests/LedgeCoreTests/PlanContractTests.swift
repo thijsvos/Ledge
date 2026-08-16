@@ -114,6 +114,83 @@ final class PlanContractTests: XCTestCase {
         XCTAssertEqual(Vault.timeStamp(on: now).count, 5)
     }
 
+    // MARK: - Ledge mints the note identifier, not the agent
+
+    func testContractAsksForThePlaceholderAndForbidsInventingAnID() {
+        let wrapped = PlanContract.wrap(prompt: "x", now: now)
+        XCTAssertTrue(wrapped.contains(PlanContract.idPlaceholder))
+        XCTAssertTrue(wrapped.contains("Never invent one"))
+    }
+
+    func testFillingIdentifiersReplacesThePlaceholderInCreatedContent() {
+        let plan = EditPlan(edits: [
+            .create(path: "notes/x.md", content: "---\nid: \(PlanContract.idPlaceholder)\n---\n"),
+        ])
+        guard case let .create(_, content) = PlanContract
+            .fillingIdentifiers(in: plan, now: now).edits[0]
+        else {
+            return XCTFail("expected a create")
+        }
+        XCTAssertFalse(content.contains(PlanContract.idPlaceholder))
+        let id = content.replacingOccurrences(of: "---\nid: ", with: "")
+            .replacingOccurrences(of: "\n---\n", with: "")
+        XCTAssertEqual(id.count, 26)
+        XCTAssertTrue(id.allSatisfy(Set("0123456789ABCDEFGHJKMNPQRSTVWXYZ").contains))
+    }
+
+    /// Two notes in one plan must not share an ID.
+    func testEachOccurrenceGetsItsOwnIdentifier() {
+        let plan = EditPlan(edits: [
+            .create(path: "notes/a.md", content: "id: \(PlanContract.idPlaceholder)"),
+            .create(path: "notes/b.md", content: "id: \(PlanContract.idPlaceholder)"),
+        ])
+        let filled = PlanContract.fillingIdentifiers(in: plan, now: now).edits
+        guard case let .create(_, first) = filled[0], case let .create(_, second) = filled[1] else {
+            return XCTFail("expected two creates")
+        }
+        XCTAssertNotEqual(first, second)
+    }
+
+    func testAppendAndReplacementTextAreFilledToo() {
+        let plan = EditPlan(edits: [
+            .append(path: "notes/a.md", text: "id: \(PlanContract.idPlaceholder)"),
+            .replace(path: "notes/b.md", find: "x", with: "id: \(PlanContract.idPlaceholder)"),
+        ])
+        for edit in PlanContract.fillingIdentifiers(in: plan, now: now).edits {
+            switch edit {
+            case let .append(_, text):
+                XCTAssertFalse(text.contains(PlanContract.idPlaceholder))
+            case let .replace(_, _, with):
+                XCTAssertFalse(with.contains(PlanContract.idPlaceholder))
+            case .create:
+                XCTFail("unexpected create")
+            }
+        }
+    }
+
+    /// `find` must match the file byte for byte, so a placeholder there is a
+    /// mistake that should fail validation loudly — never be rewritten into
+    /// something that cannot match either.
+    func testFindIsLeftAloneSoAMisplacedPlaceholderFailsLoudly() {
+        let plan = EditPlan(edits: [
+            .replace(path: "notes/b.md", find: "id: \(PlanContract.idPlaceholder)", with: "y"),
+        ])
+        guard case let .replace(_, find, _) = PlanContract
+            .fillingIdentifiers(in: plan, now: now).edits[0]
+        else {
+            return XCTFail("expected a replace")
+        }
+        XCTAssertEqual(find, "id: \(PlanContract.idPlaceholder)")
+    }
+
+    func testPlanWithoutPlaceholdersIsUnchanged() {
+        let plan = EditPlan(edits: [
+            .create(path: "notes/x.md", content: "# Plain\n"),
+            .append(path: "notes/y.md", text: "- a line\n"),
+        ])
+        XCTAssertEqual(PlanContract.fillingIdentifiers(in: plan, now: now), plan)
+    }
+
     // MARK: - Contract and decoder agree
 
     func testEveryOperationIsNamed() {

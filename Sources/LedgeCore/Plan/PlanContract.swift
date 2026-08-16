@@ -24,6 +24,46 @@
 import Foundation
 
 public enum PlanContract {
+    /// What the agent writes where a note's ULID belongs. A placeholder rather
+    /// than a real ID because the agent cannot mint one (see `ULID`) — and a
+    /// placeholder rather than a supplied list because a plan may create any
+    /// number of notes, and running out silently would put us back to invented
+    /// IDs.
+    public static let idPlaceholder = "{{ulid}}"
+
+    /// Replaces every `idPlaceholder` in a plan with a freshly minted ULID —
+    /// one per occurrence, so two notes in the same plan never collide.
+    ///
+    /// Runs BEFORE validation, so the byte caps count what will actually be
+    /// written and the applier's pre-images match the bytes on disk. `find` is
+    /// deliberately untouched: it must match the file byte for byte, so a
+    /// placeholder there is a mistake that should fail loudly rather than be
+    /// rewritten into something that cannot match either.
+    public static func fillingIdentifiers(in plan: EditPlan, now: Date = Date()) -> EditPlan {
+        EditPlan(edits: plan.edits.map { edit in
+            switch edit {
+            case let .create(path, content):
+                .create(path: path, content: filling(content, now: now))
+            case let .append(path, text):
+                .append(path: path, text: filling(text, now: now))
+            case let .replace(path, find, with):
+                .replace(path: path, find: find, with: filling(with, now: now))
+            }
+        })
+    }
+
+    private static func filling(_ text: String, now: Date) -> String {
+        guard text.contains(idPlaceholder) else { return text }
+        var result = ""
+        var rest = Substring(text)
+        while let found = rest.range(of: idPlaceholder) {
+            result += rest[rest.startIndex ..< found.lowerBound]
+            result += ULID.make(at: now)
+            rest = rest[found.upperBound...]
+        }
+        return result + rest
+    }
+
     /// Wraps the user's prompt in the edit-plan contract. The user's own words
     /// come last: they are what the agent should act on, and recency helps.
     public static func wrap(prompt: String, now: Date = Date()) -> String {
@@ -53,6 +93,8 @@ public enum PlanContract {
           line already under it, and put both back with your new line after them
         - Stamp a log entry with the current time above, as "- HH:MMZ text" — never
           invent a time and never copy the one in the example
+        - A new note's frontmatter "id:" must be exactly \(idPlaceholder) — Ledge
+          swaps in a real time-ordered identifier. Never invent one
         - Paths are relative to the vault root and must end in .md
         - "find" must match exactly once in that file; reproduce it byte for byte
         - There is no delete operation
