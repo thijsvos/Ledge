@@ -34,16 +34,14 @@ public enum OpenIslandLayout {
     /// is grown: for `fieldExtraHeight > 0` the chosen rows satisfy
     /// `base + fieldExtra + rows × rowHeight ≤ max` exactly.
     ///
-    /// - Parameters:
-    ///   - fieldExtraHeight: measured field height minus its one-line height
-    ///     (`OpenLayoutModel.fieldExtraHeight`).
-    ///   - requestedRows: rows the active list wants (already capped by the
-    ///     model's `maxVisibleRows`); negative values are treated as 0.
-    ///   - rowHeight: one list row's fixed height.
-    ///   - baseHeight: the open shape's height with a one-line field and no
-    ///     rows (120 for suggestions, 90 for the picker).
-    ///   - maxHeight: the constant expanded window height (the shape can
-    ///     never exceed the window).
+    /// `fieldExtraHeight` is the measured field height minus its one-line
+    /// height (`OpenLayoutModel.fieldExtraHeight`), and `requestedRows` is what
+    /// the active list wants, already capped by its own `maxVisibleRows` — a
+    /// negative value counts as 0. `rowHeight` is one list row. `baseHeight` is
+    /// the open shape with a one-line field and no rows: 120 for the suggestion
+    /// list and the ⌘↩ chooser, 90 for the picker, which buys its fifth row by
+    /// hiding the hint line. `maxHeight` is the constant expanded window the
+    /// shape may never exceed (§4 — the NSWindow itself never resizes).
     public static func compute(
         fieldExtraHeight: CGFloat,
         requestedRows: Int,

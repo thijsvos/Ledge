@@ -66,7 +66,8 @@ public enum NotchGeometry {
     public static let fakeIslandMinHeight: CGFloat = 24
     /// The expanded window is the island width plus this much.
     public static let expandedExtraWidth: CGFloat = 560
-    /// The expanded window height.
+    /// The expanded window height — constant in every island state. Only the
+    /// shape inside animates; the NSWindow is never resized (§4).
     public static let expandedHeight: CGFloat = 200
 
     /// A screen has a notch iff the top safe-area inset is positive AND both

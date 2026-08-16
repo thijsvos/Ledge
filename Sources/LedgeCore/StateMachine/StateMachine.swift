@@ -121,8 +121,8 @@ public final class IslandController {
     private let peekDuration: TimeInterval
     @ObservationIgnored private var peekExpiryTask: Task<Void, Never>?
 
-    /// - Parameter peekDuration: how long a `.peek` shows before auto-expiring
-    ///   (2.5 s per §4; injectable for tests).
+    /// `peekDuration` is how long a `.peek` shows before it auto-expires —
+    /// 2.5 s per §4, injectable so tests do not have to sleep through it.
     public init(peekDuration: TimeInterval = 2.5) {
         self.peekDuration = peekDuration
     }

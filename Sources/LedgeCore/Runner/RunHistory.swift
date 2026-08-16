@@ -56,6 +56,11 @@ public struct RunRecord: Codable, Equatable, Sendable {
     /// `decodeIfPresent`, so pre-field JSONL lines still decode (tested).
     public var model: String?
     public var outcome: Outcome
+    /// The vault files LEDGE wrote (`AppliedPlan.filesChanged`), not what the
+    /// agent proposed: a refused plan changed nothing and records nothing, and
+    /// so does a cancelled run. The /resume picker renders "N files" from this,
+    /// so filling it from the stream's like-named `RunSummary.editedFiles`
+    /// would show nothing forever (§2.3).
     public var editedFiles: [String]
     public var durationMS: Int?
     /// Result text truncated to `maxResultExcerptLength` characters.

@@ -67,6 +67,10 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         defaults.set(true, forKey: DefaultsKey.hasRunOnboarding)
     }
 
+    /// Builds the one Settings window. `isReleasedWhenClosed = false` is what
+    /// makes it single-instance: closing must leave the object alive so `show()`
+    /// brings the same window — and whatever onboarding-sheet state it holds —
+    /// back, instead of building a second one behind the first.
     private func makeWindow() -> NSWindow {
         let hosting = NSHostingController(rootView: currentSettingsView())
         self.hosting = hosting

@@ -49,7 +49,12 @@ public struct StreamParser: Sendable {
     public private(set) var sessionID: String?
     /// Assistant `text` content blocks, in order (kept for a detail view).
     public private(set) var transcript: [String] = []
-    /// `input.file_path` of Write/Edit tool_use blocks — ordered, de-duplicated.
+    /// `input.file_path` of Write/Edit `tool_use` blocks — ordered,
+    /// de-duplicated. Kept because the parser is coded against the OBSERVED
+    /// stream rather than against Ledge's own flags, but it stays empty under
+    /// the §2.3 invocation: Write and Edit are denied, so no such block can
+    /// arrive. Never source a file count from it — what a run actually changed
+    /// is `AppliedPlan.filesChanged` (see `RunSummary.editedFiles`).
     public private(set) var editedFiles: [String] = []
     /// The final `result` event, if one arrived.
     public private(set) var result: RunResultEvent?

@@ -172,8 +172,10 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
             // Model/effort select WHICH model does the note-work; the §2.3
-            // sandbox flags (allowedTools, acceptEdits, max-turns) are pinned
-            // in LedgeCore and not configurable here.
+            // sandbox flags (allowedTools, disallowedTools, max-turns) are
+            // pinned in `ClaudeRunner.arguments` and not configurable here.
+            // There is no --permission-mode: the agent holds no edit tools,
+            // so there is nothing to accept.
             HStack {
                 TextField(
                     "Model",

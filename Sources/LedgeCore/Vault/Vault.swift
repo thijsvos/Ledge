@@ -1,6 +1,7 @@
 // Vault path validation and helpers (§5). LedgeCore imports Foundation only;
-// the App layer supplies the root path (UserDefaults key "vaultPath" until the
-// Settings UI arrives in Phase 4 — see CaptureCoordinator). No global state.
+// the App layer supplies the root path (the §7 Settings vault picker writes
+// UserDefaults "vaultPath" — see CaptureCoordinator). No global state, so a
+// vault is never validated against a root someone else has since changed.
 
 import Foundation
 import os
@@ -31,10 +32,19 @@ public enum VaultError: Error, Equatable, Sendable, LocalizedError {
 /// A validated register vault root. Construction proves the path exists and is
 /// a directory; helpers derive the well-known locations Ledge writes to.
 public struct Vault: Equatable, Sendable {
+    /// The root exactly as it was handed in — NOT standardized and NOT
+    /// symlink-resolved. `init` resolves a copy to run its §2.5 checks and
+    /// never writes the result back, so this stays the folder the user
+    /// actually chose: it becomes the child's cwd and the value the App layer
+    /// compares runners by. Consequence: equality is path equality, so `/tmp`
+    /// and `/private/tmp` are different vaults, and comparing this against an
+    /// already-resolved path will not match.
     public let root: URL
 
-    /// Validating init: `root` must exist and be a directory (§2.5 — refuse to
-    /// operate on a vault path that isn't a real folder).
+    /// Validating init: `root` must exist, be a directory, and be neither the
+    /// filesystem root nor the home folder (§2.5 — an unattended run's cwd is
+    /// never `/` and never `~`). Every refusal is a typed `VaultError` whose
+    /// `errorDescription` the peeks and Settings show verbatim.
     public init(root: URL) throws {
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: root.path, isDirectory: &isDirectory) else {
@@ -47,9 +57,12 @@ public struct Vault: Equatable, Sendable {
                 .error("vault root is not a directory: \(root.path, privacy: .public)")
             throw VaultError.rootIsNotADirectory(path: root.path)
         }
-        // §2.5 (safety): an unattended acceptEdits agent must never run with
-        // cwd `/` or the user's home folder — refuse both outright. Symlinks
-        // are resolved first so a link to the home directory cannot sneak past.
+        // §2.5 (safety): an unattended run must never have cwd `/` or the
+        // user's home folder — refuse both outright. The agent is read-only
+        // now and Ledge does the writing, but the fence outlived the flag:
+        // cwd is what Read/Glob/Grep range over, and every edit-plan path
+        // resolves against it. Symlinks are resolved first so a link to the
+        // home directory cannot sneak past.
         let resolvedPath = root.standardizedFileURL.resolvingSymlinksInPath().path
         guard resolvedPath != "/" else {
             Logger(subsystem: "app.ledge", category: "vault")

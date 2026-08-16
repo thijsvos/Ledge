@@ -2,8 +2,8 @@
 // so: explicit override → well-known locations → one cached login-shell
 // lookup (`/bin/zsh -lc 'command -v claude'` — on machines where claude lives
 // behind a version manager like fnm, this is the path that matters) → nil,
-// which the UI surfaces as "Claude Code not found" (full onboarding is
-// Phase 4). Never bundles or downloads the CLI.
+// which the UI surfaces as "Claude Code not found" (§7 onboarding walks the
+// user from there). Never bundles or downloads the CLI.
 
 import Foundation
 import os
@@ -46,12 +46,12 @@ public final class ClaudeBinaryResolver: @unchecked Sendable {
     private let lock = NSLock()
     private let logger = Logger(subsystem: "app.ledge", category: "runner")
 
-    /// - Parameters:
-    ///   - overridePath: the Settings override (Phase 4 UI; plumbed now).
-    ///   - isExecutable: injectable for tests; defaults to FileManager.
-    ///   - shellLookup: injectable for tests; defaults to the login-shell
-    ///     `command -v claude` probe.
-    ///   - home: injectable for tests; tilde paths expand against this.
+    /// `overridePath` is the §7 Settings binary override. The other three are
+    /// test seams: `isExecutable` and `shellLookup` default to the real
+    /// FileManager check and the login-shell `command -v claude` probe, and
+    /// `home` is what the `~` in `probePaths` expands against — without all
+    /// three, these tests would pass or fail on whether the machine running
+    /// them happens to have claude installed.
     public init(
         overridePath: String? = nil,
         isExecutable: @escaping (String) -> Bool = {

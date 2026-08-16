@@ -42,9 +42,10 @@ final class AgentRunController: AgentRunSubmitting {
     private var resolverOverridePath: String?
     private var runner: ClaudeRunner?
     private var runnerVaultPath: String?
-    /// The validated vault the current runner writes into. Held so the
-    /// completion path can apply the returned edit plan without re-validating
-    /// a path the submission already proved.
+    /// The validated vault the current run targets. Held so the completion
+    /// path can apply the returned edit plan without re-validating a path the
+    /// submission already proved — the child never writes here; the plan
+    /// applier does (§2.3).
     private var runnerVault: Vault?
     /// The last applied run's pre-images, for `/undo`. One slot, because §2.4
     /// allows one run per vault at a time. Deliberately in memory only: undo
@@ -644,6 +645,16 @@ final class AgentRunController: AgentRunSubmitting {
 
     // MARK: - Runner lifetime & events
 
+    /// The runner for this exact (vault, binary, model, effort) tuple, retiring
+    /// the previous one if ANY of the four changed — a fresh `Configuration`
+    /// cannot be handed to a live actor.
+    ///
+    /// The returned runner is not yet safe to enqueue on: retirement only
+    /// STARTS the SIGTERM→SIGKILL drain, and §2.4 forbids the old child
+    /// overlapping the new one, so every caller must `await retirementDrain`
+    /// before enqueuing. Call it only from the submission chain — it clears the
+    /// live-run bookkeeping and rebuilds the events task, and two of these
+    /// interleaved would leave the island holding a handle no runner owns.
     private func ensureRunner(
         vault: Vault,
         vaultPath: String,
@@ -758,6 +769,15 @@ final class AgentRunController: AgentRunSubmitting {
         }
     }
 
+    /// The completion fan-out, in an order that cannot be shuffled: apply the
+    /// plan first (its result is what the history record's `editedFiles` and the
+    /// success peek's file count both read), then record history, then clear the
+    /// bookkeeping, then peek.
+    ///
+    /// `island.clearLiveRun()` is deliberately conditional — with runs still
+    /// queued the dot must stay lit, and clearing it would make peek expiry fall
+    /// back to `.collapsed` mid-queue. The session ID is persisted on BOTH
+    /// outcomes: a failed run is exactly the one a user wants to resume.
     private func handle(completion: RunCompletion) {
         // Before recordHistory, because the record's editedFiles must be what
         // Ledge actually wrote rather than what the agent asked for.
@@ -791,8 +811,9 @@ final class AgentRunController: AgentRunSubmitting {
     /// Reads the run's reply and applies the edit plan it carries. Nil for a
     /// failed run: there is no reply to read a plan out of.
     ///
-    /// Synchronous on purpose. The validator caps a plan at 20 files and 1 MB,
-    /// this runs once at the end of a ~20 s run (never on a §10 hot path), and
+    /// Synchronous on purpose. The validator caps a plan at 20 edits and 1 MB
+    /// of new material, this runs once at the end of a ~20 s run (never on a
+    /// §10 hot path), and
     /// applying it off-main would open a window where the run reports finished
     /// before the vault reflects it.
     private func planOutcome(for outcome: RunOutcome) -> PlanApplication.Outcome? {

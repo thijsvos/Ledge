@@ -1,6 +1,11 @@
 import AppKit
 import os
 
+/// Ledge's AppKit lifecycle (§3: `LSUIElement`, no Dock icon, no main window).
+/// Owns the three long-lived controllers — the notch panel, the status item,
+/// and Settings — and nothing else: every behaviour lives behind one of them,
+/// so this file only decides what exists, in what order, and how they reach
+/// each other.
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var notchWindowController: NotchWindowController?
@@ -54,6 +59,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return false
     }
 
+    /// The §6 quit path: tearing the notch controller down SIGTERMs any live
+    /// `claude` child — including retired ones still dying — before the process
+    /// exits. Nothing about the run is persisted; it is simply stopped. This
+    /// runs on the main thread with no guarantee that async work will ever
+    /// resume, which is why the whole path down to `ClaudeRunner.terminateNow()`
+    /// is signal-based rather than awaited — do not add an `await` here. The
+    /// controller is dropped afterwards so a late callback cannot revive
+    /// monitors the teardown just removed.
     func applicationWillTerminate(_: Notification) {
         notchWindowController?.teardown()
         notchWindowController = nil
@@ -110,6 +123,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 @main
 @MainActor
 enum LedgeMain {
+    /// The app delegate's only strong owner. `NSApplication.delegate` does NOT
+    /// retain what it is given, so a delegate constructed inline in `main()`
+    /// would be released before the first callback and Ledge would launch with
+    /// no panel, no status item, and no `applicationWillTerminate` to stop a
+    /// live child. Static, not a local, for exactly that reason.
     private static let delegate = AppDelegate()
 
     static func main() {

@@ -1,9 +1,11 @@
 // §6 ClaudeRunner: an actor owning a serialized FIFO queue — at most ONE
 // child `claude` process is ever alive (§2.4, one run per vault). Spawns the
 // user's official CLI (the ONLY integration, §2.1) with a sanitized
-// environment (§2.2), the exact read/edit-only tool set (§2.3), and the vault
-// as cwd (§2.5). Structured concurrency throughout; `waitUntilExit` is never
-// used — termination is bridged into the actor via the termination handler.
+// environment (§2.2), the read-only tool set §2.3 pins — no Write, no Edit,
+// no Bash; the child reports an edit plan and Ledge performs every write —
+// and the vault as cwd (§2.5). Structured concurrency throughout;
+// `waitUntilExit` is never used — termination is bridged into the actor via
+// the termination handler.
 
 import Foundation
 import os
@@ -13,6 +15,10 @@ import os
 /// Result of `enqueue(prompt:)`.
 public enum Enqueued: Sendable {
     case started(RunHandle)
+    /// Accepted behind a live run. `position` is 1-based and counts only the
+    /// PENDING queue — 1 means "next to run", and the live run is not in it.
+    /// `PeekView` renders it verbatim as "Queued #n", so it is the user's
+    /// place in line rather than an index into anything.
     case queued(RunHandle, position: Int)
     case rejected(reason: RejectionReason)
 }
@@ -32,6 +38,11 @@ public enum RejectionReason: Sendable, Equatable {
 /// What a finished successful run yielded.
 public struct RunSummary: Sendable, Equatable {
     public let sessionID: String?
+    /// Paths the CLI's own Write/Edit `tool_use` blocks named — ALWAYS EMPTY
+    /// under the §2.3 invocation, since both tools sit in `--disallowedTools`
+    /// and the stream can no longer carry them. The file count the user sees
+    /// comes from `AppliedPlan.filesChanged`, what Ledge itself wrote;
+    /// sourcing it here instead shows "0 files" for every successful run.
     public let editedFiles: [String]
     public let durationMS: Int?
     public let numTurns: Int?
@@ -583,7 +594,9 @@ public actor ClaudeRunner {
             ))
         }
         guard let result = parser.result else {
-            // Exit 0 but no result event: malformed stream (§ decision 5).
+            // Exit 0 but no result event: the CLI cannot have finished its
+            // turn, so this is a malformed stream and not a success (§6:
+            // "non-zero exit / malformed stream → failure peek").
             return .failure(RunFailure(
                 reason: .malformedStream,
                 stderrTail: tail,

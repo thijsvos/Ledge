@@ -3,8 +3,8 @@
 // choice. Pure identity + one pure resolver — the chooser UI state lives in
 // ModelChoiceModel, the plumbing in ClaudeRunner.enqueue, and the resolver is
 // what the spawn site feeds into the EXISTING
-// `ClaudeRunner.arguments(prompt:resumeSessionID:model:effort:)` builder (the
-// argv shape itself is untouched). Effort is deliberately NOT part of this:
+// `ClaudeRunner.arguments(prompt:resumeSessionID:model:effort:now:)` builder
+// (the argv shape itself is untouched). Effort is deliberately NOT part of this:
 // every choice leaves `Configuration.effort` exactly as configured.
 
 import Foundation

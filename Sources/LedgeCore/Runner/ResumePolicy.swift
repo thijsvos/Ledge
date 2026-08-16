@@ -19,13 +19,14 @@ public enum ResumePolicy {
         }
     }
 
-    /// - Parameters:
-    ///   - enabled: the "Continue last session for / runs" toggle (§7,
-    ///     UserDefaults "continueLastSession", default false).
-    ///   - stored: the persisted "lastSessionID:<vault>" value, if any.
-    /// - Returns: the session ID to pass as `--resume`, or nil for a fresh
-    ///   session (§6 default). Disabled toggle ignores the stored value
-    ///   entirely (and never clears it).
+    /// Decides whether a `/` run resumes the vault's last session. `enabled`
+    /// is the §7 "Continue last session for / runs" toggle (UserDefaults
+    /// "continueLastSession", default false); `stored` is the persisted
+    /// "lastSessionID:<vault>" value.
+    ///
+    /// A nil `sessionID` means a fresh session — the §6 default. The toggle
+    /// gates everything: while it is off the stored value is ignored entirely
+    /// and never cleared, so turning it back on still finds the old session.
     public static func pickResumeSessionID(enabled: Bool, stored: String?) -> Choice {
         guard enabled else {
             return Choice(sessionID: nil, shouldClearStored: false)

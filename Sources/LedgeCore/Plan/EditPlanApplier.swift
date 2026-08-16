@@ -28,9 +28,16 @@ public enum EditPlanApplyError: Error, Equatable, Sendable, LocalizedError {
     }
 }
 
+/// What one applied plan actually did, and how to take it back.
 public struct AppliedPlan: Equatable, Sendable {
     /// Distinct files written, in first-touched order.
     public let filesChanged: [URL]
+    /// Pre-images for every file the plan touched (first touch wins), plus the
+    /// folders it created. Plain data with no tie to the vault, the plan, or
+    /// the run that produced it, so a caller may hold it for as long as
+    /// `/undo` might reach this run — which is exactly what the App layer
+    /// does, in memory, for one run at a time. Nothing here retains it: a
+    /// caller that drops it has made the run permanent.
     public let undo: RunUndoRecord
 
     public var isEmpty: Bool {
@@ -39,6 +46,15 @@ public struct AppliedPlan: Equatable, Sendable {
 }
 
 public enum EditPlanApplier {
+    /// Writes a validated plan and hands back the pre-images needed to take it
+    /// away again.
+    ///
+    /// All-or-nothing: any step that fails — including a file another process
+    /// changed since validation (§1: register's UI and sync clients write this
+    /// vault too) — restores everything already written before rethrowing, so
+    /// a throw means the vault is where it started rather than holding half a
+    /// plan. Each step re-reads its file first; "unchanged" means
+    /// byte-identical to what the validator saw, absence included.
     public static func apply(_ plan: ValidatedPlan) throws -> AppliedPlan {
         let logger = Logger(subsystem: "app.ledge", category: "runner")
         var undo = RunUndoRecord()

@@ -13,8 +13,11 @@ public enum InstantTarget: Equatable, Sendable {
 
 /// What one submitted capture-field input means.
 public enum CaptureRoute: Equatable, Sendable {
-    /// Input started with `/` — the prompt is everything after the slash
-    /// (untrimmed). Handed to ClaudeRunner in Phase 3.
+    /// Input started with `/` — the prompt is everything after the slash,
+    /// untrimmed, so a bare `"/"` yields an empty prompt. The App layer hands
+    /// it to `ClaudeRunner`, restoring the leading slash first when the first
+    /// token names a known Claude command (see
+    /// `SlashCommandCatalog.restoringCommandSlash`).
     case agent(prompt: String)
     /// Anything else — Ledge appends the text itself. Zero AI, zero tokens.
     case instant(target: InstantTarget, text: String)

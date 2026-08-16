@@ -2,9 +2,10 @@ import Foundation
 import LedgeCore
 import os
 
-/// Phase-3 seam: whatever runs agent prompts. `ClaudeRunner`'s @MainActor
-/// façade adopts this in Phase 3 and is handed to `CaptureCoordinator` —
-/// CaptureView and the coordinator API stay untouched.
+/// The seam between the capture field and whatever runs agent prompts.
+/// `AgentRunController` is the only adopter — a @MainActor façade over the
+/// `ClaudeRunner` actor — so CaptureView and the coordinator never have to
+/// cross into the runner's concurrency domain to submit a prompt.
 @MainActor
 protocol AgentRunSubmitting: AnyObject {
     /// `prompt` is everything after the leading `/` (untrimmed) — except
@@ -50,18 +51,21 @@ struct NativeCommandActions {
 /// the 50 ms budget — so the island collapses into its peek immediately on
 /// Enter and the field never blocks on I/O.
 ///
-/// The vault path comes from UserDefaults key "vaultPath" (standard defaults).
-/// The Settings UI arrives in Phase 4; Phase-2 QA sets the path via:
-///
-///     defaults write app.ledge.Ledge vaultPath '<path>'
+/// The vault path comes from UserDefaults key "vaultPath" (standard
+/// defaults), written by the §7 Settings vault picker — `DefaultsKey.vaultPath`
+/// is the shared constant. It is read fresh on every submit, so changing the
+/// folder in Settings takes effect on the next Enter with no restart and no
+/// cached `Vault`.
 @MainActor
 final class CaptureCoordinator {
     nonisolated static let vaultPathDefaultsKey = "vaultPath"
 
     private let island: IslandController
     private let defaults: UserDefaults
-    /// Nil until Phase 3 plugs ClaudeRunner in; `/` inputs then peek an info
-    /// banner instead of running.
+    /// Weak because `NotchWindowController` owns both objects — the
+    /// coordinator must not keep the run controller alive past teardown. Nil
+    /// only in tests that build a coordinator on its own; `/` inputs then peek
+    /// an info banner instead of running.
     weak var agentRunner: (any AgentRunSubmitting)?
     /// The CURRENT slash-command catalog (owned by the window controller,
     /// rescanned once per island open). The catalog no longer feeds the

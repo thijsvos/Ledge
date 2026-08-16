@@ -74,6 +74,21 @@ public enum EditPlanValidator {
     public static let maxEdits = 20
     public static let maxBytesWritten = 1_000_000
 
+    /// Checks every edit against the vault fence and returns the exact bytes
+    /// each one will write, or throws the first refusal. Nothing touches disk.
+    ///
+    /// The walk is ordered and stateful: later edits see the projected result
+    /// of earlier ones, so create-then-append to the same path is legal and is
+    /// checked the way it will actually run. `maxBytesWritten` sums only the
+    /// NEW material each edit contributes — an append's text, not the file it
+    /// lands in — so a plan is measured by what it adds rather than by what it
+    /// re-states.
+    ///
+    /// The result is a SNAPSHOT: each step carries the file contents as they
+    /// were during this call, and the applier refuses any file whose contents
+    /// moved since. Holding a `ValidatedPlan` and applying it much later is
+    /// therefore not cheaper, it is a `changedUnderfoot` waiting to happen —
+    /// validate and apply back to back.
     public static func validate(_ plan: EditPlan, in vault: Vault) throws -> ValidatedPlan {
         guard plan.edits.count <= maxEdits else {
             throw EditPlanRejection.tooManyEdits(count: plan.edits.count, limit: maxEdits)

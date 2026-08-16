@@ -130,6 +130,19 @@ final class NotchWindowController: NSObject {
     private var scannedCatalog = SlashCommandCatalog()
     private var suggestionScanTask: Task<Void, Never>?
 
+    /// Builds the whole notch stack in one pass. The order is load-bearing.
+    ///
+    /// Everything before `super.init()` runs without a usable `self`, so the
+    /// first `NotchRootView` is seeded with no-op closures — a placeholder that
+    /// renders but does nothing. `installRootView()` immediately after is what
+    /// swaps in the real `[weak self]` handlers; delete that apparent
+    /// duplication, or move it after an early return, and the island draws
+    /// perfectly and ignores every click.
+    ///
+    /// The window is ordered front BEFORE the monitors and the hotkey go in, so
+    /// nothing can ask the island to change state before there is a collapsed
+    /// shape to change. `applyWindowSideEffects()` runs last because it reads
+    /// the state the observation just armed.
     override init() {
         let island = IslandController()
         self.island = island
@@ -329,6 +342,17 @@ final class NotchWindowController: NSObject {
         installRootView()
     }
 
+    /// Rebuilds the entire root view. A SwiftUI view is a struct, so there is
+    /// no mutating one field of a mounted one — `layout` and `reduceMotion` are
+    /// stored properties of `NotchRootView`, and the only way to change them is
+    /// to hand `hostingView` a whole new value.
+    ///
+    /// Called from the three places that each change one of those inputs:
+    /// `init` (replacing the placeholder's no-op closures), a screen-geometry
+    /// recompute, and a live Reduce Motion change. Every closure captures self
+    /// weakly — the window retains the hosting view, which retains these
+    /// closures, so a strong capture would be a cycle through AppKit and would
+    /// leak the controller, its monitors, and its live runner.
     private func installRootView() {
         hostingView.rootView = NotchRootView(
             island: island,
@@ -847,6 +871,14 @@ final class NotchWindowController: NSObject {
         captureCoordinator.submit(input, modelChoice: choice)
     }
 
+    /// Click-outside dismissal for clicks that reach our own windows. The shape
+    /// rect is recomputed from `IslandView.shapeSize` using the SAME model
+    /// values the view draws from — suggestion, picker and chooser rows, the
+    /// field's wrap growth, the running hover chip. Any drift between the
+    /// arguments here and the view's makes clicks near the shape's bottom edge
+    /// either dismiss the island or land in a dead zone, and every new
+    /// open-state element has to be threaded through here. That class of bug is
+    /// exactly why `OpenIslandLayout` is shared arithmetic in LedgeCore.
     private func handleLocalMouseDown(_ event: NSEvent) {
         guard island.state == .open else { return }
         guard event.window === window else {
