@@ -126,7 +126,7 @@ final class NotchWindowController: NSObject {
     /// zero polling/timers/watchers (§10). NOT shown in the suggestion list
     /// (that lists Ledge's native commands); kept solely for
     /// CaptureCoordinator's submit-time slash restoration, so a typed Claude
-    /// command ("/vet …") still reaches the CLI as a command, invisibly.
+    /// command ("/vet …") still reaches the CLI named as a command, invisibly.
     private var scannedCatalog = SlashCommandCatalog()
     private var suggestionScanTask: Task<Void, Never>?
 
@@ -213,12 +213,12 @@ final class NotchWindowController: NSObject {
         }
 
         // Submit-time slash restoration: CaptureRouter strips the leading
-        // "/" (§5), but headless claude dispatches a custom command or skill
-        // only when the prompt itself starts with "/". The coordinator
-        // consults the CURRENT catalog (rescanned per open) so a fully typed
-        // known Claude command actually invokes the command; freeform `/`
-        // prompts flow to the runner unchanged. This is the ONLY consumer of
-        // the scan now — the suggestion UI lists Ledge's native commands.
+        // "/" (§5), so this puts it back when the first token exactly names a
+        // catalog command. The coordinator consults the CURRENT catalog
+        // (rescanned per open) so a fully typed known Claude command is asked
+        // for by name; freeform `/` prompts flow to the runner unchanged. This
+        // is the ONLY consumer of the scan now — the suggestion UI lists
+        // Ledge's native commands.
         captureCoordinator.slashCommandCatalog = { [weak self] in
             self?.scannedCatalog ?? SlashCommandCatalog()
         }
@@ -934,8 +934,9 @@ final class NotchWindowController: NSObject {
     /// Fires a catalog scan for one transition into `.open`. The scan result
     /// no longer feeds the suggestion UI (the list shows Ledge's native
     /// commands) — it exists so submit-time slash restoration keeps working
-    /// invisibly: a typed Claude command's prompt must reach the CLI with its
-    /// leading "/" restored, or the child reads the name as prose. Called
+    /// invisibly: a typed Claude command's prompt reaches the CLI with its
+    /// leading "/" restored, naming the command rather than describing it.
+    /// Called
     /// directly from the two (and only) call sites that request `.open` —
     /// tap and hotkey — NOT from the coalesced observation callback:
     /// observation re-arms asynchronously, so a rapid close→reopen can

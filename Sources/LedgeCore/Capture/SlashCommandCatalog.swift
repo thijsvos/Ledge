@@ -67,12 +67,20 @@ public struct SlashCommandCatalog: Equatable, Sendable {
     }
 
     /// Submit-time slash restoration. The §5 router hands the runner
-    /// everything AFTER the leading "/", but headless claude dispatches a
-    /// custom command or skill only when the prompt string itself starts
-    /// with "/" — a slash-less command name arrives as ordinary prose. If
+    /// everything AFTER the leading "/", so a typed command's name would reach
+    /// the child stripped of the mark that says "this is a command". If
     /// `prompt`'s first whitespace-delimited token exactly names a catalog
-    /// command, this restores the slash; any other prompt (freeform agent
+    /// command, this puts the slash back; any other prompt (freeform agent
     /// text) is returned unchanged, preserving the §5 contract.
+    ///
+    /// This is a nudge, not a precondition — live-probed against claude
+    /// 2.1.226. Dispatch is model-mediated rather than positional: the CLI
+    /// advertises the vault's commands in its init event and exposes a `Skill`
+    /// tool, and the model invokes it. So the slash need not lead the prompt
+    /// (`PlanContract` puts the user's words last, ~900 characters in, and the
+    /// command still fired), and the bare name fired too. The slash is kept
+    /// because it states the intent explicitly, which is the difference
+    /// between relying on a judgement call and asking for the thing by name.
     ///
     /// The match is exact (case-sensitive): typeahead completion inserts the
     /// exact catalog name, and a wrong-cased hand-typed name flows through

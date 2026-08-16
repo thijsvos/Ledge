@@ -10,9 +10,10 @@ import os
 protocol AgentRunSubmitting: AnyObject {
     /// `prompt` is everything after the leading `/` (untrimmed) — except
     /// that a prompt whose first token names a known slash command keeps its
-    /// leading `/` (see `SlashCommandCatalog.restoringCommandSlash`), so the
-    /// headless child dispatches the command instead of reading its name as
-    /// prose. `modelChoice` is the ⌘↩ per-run model selection; `.configured`
+    /// leading `/` (see `SlashCommandCatalog.restoringCommandSlash`), which
+    /// asks the child for that command by name rather than leaving the
+    /// dispatch to inference. `modelChoice` is the ⌘↩ per-run model selection;
+    /// `.configured`
     /// (every pre-chooser path) is the Settings default.
     func submitAgentRun(prompt: String, modelChoice: RunModelChoice)
 }
@@ -125,10 +126,11 @@ final class CaptureCoordinator {
         switch route {
         case let .agent(prompt):
             if let agentRunner {
-                // §5 hands the runner everything AFTER the "/", but a prompt
-                // naming a known custom command/skill must reach claude WITH
-                // the slash or the child reads it as prose (prompt content
-                // is not part of the pinned §2.3 argv shape).
+                // §5 hands the runner everything AFTER the "/", so a prompt
+                // naming a known custom command/skill gets the slash put back
+                // — asking for it by name rather than leaving the dispatch to
+                // inference (prompt content is not part of the pinned §2.3
+                // argv shape).
                 agentRunner.submitAgentRun(
                     prompt: slashCommandCatalog().restoringCommandSlash(prompt),
                     modelChoice: modelChoice
