@@ -852,18 +852,24 @@ final class AgentRunController: AgentRunSubmitting {
 
     /// Reverses the last applied run. One slot (§2.4: one run per vault), and
     /// only while the vault has not been switched out from under it.
+    /// `/undo` runs synchronously on Enter, so every branch peeks through
+    /// `userPeek` rather than `showPeek`: the island is `.open` by definition
+    /// at this point (the user just submitted from the field), and `showPeek`
+    /// exists to drop LATE runner-driven peeks that would yank a reopened
+    /// field away. Routing this through it swallowed all three messages —
+    /// undo worked and said nothing.
     func undoLastRun() {
         guard let lastUndo else {
-            return showPeek(.info(message: "Nothing to undo"))
+            return userPeek(.info(message: "Nothing to undo"))
         }
         guard lastUndo.vaultPath == runnerVaultPath else {
             self.lastUndo = nil
-            return showPeek(.info(message: "Nothing to undo in this vault"))
+            return userPeek(.info(message: "Nothing to undo in this vault"))
         }
         let restored = RunUndo.restore(lastUndo.record)
         self.lastUndo = nil
         logger.info("undid last run: \(restored) file(s) restored")
-        showPeek(.info(message: "Undone — \(restored) file\(restored == 1 ? "" : "s") restored"))
+        userPeek(.info(message: "Undone — \(restored) file\(restored == 1 ? "" : "s") restored"))
     }
 
     private func resumeAction(sessionID: String?) -> ResumeAction? {
@@ -972,6 +978,15 @@ final class AgentRunController: AgentRunSubmitting {
     /// "continue last session").
     private func showPeek(_ content: PeekContent) {
         guard island.state != .open else { return }
+        island.transition(to: .peek(content))
+    }
+
+    /// A peek the user asked for by pressing Enter, so it REPLACES `.open`
+    /// instead of deferring to it — the same reasoning as `reject`. Use this
+    /// for native-command feedback and `showPeek` for anything a finished run
+    /// delivers later; the guard in `showPeek` protects typed text that this
+    /// path has no reason to protect (the field was just submitted).
+    private func userPeek(_ content: PeekContent) {
         island.transition(to: .peek(content))
     }
 
