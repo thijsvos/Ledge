@@ -209,8 +209,12 @@ to the user's locally installed Claude Code CLI. SwiftUI + AppKit, macOS 14.0+
   ~/.claude; NEVER call Anthropic HTTP endpoints; NEVER add an API-key field.
   The ONLY integration is spawning the user's `claude` binary.
 - Child process env must strip ANTHROPIC_API_KEY (test asserts this).
-- Headless runs: allowedTools exactly "Read,Write,Edit,Glob,Grep", permission-mode
-  acceptEdits, max-turns 6, cwd = vault. Never widen without explicit instruction.
+- Headless runs: allowedTools exactly "Read,Glob,Grep", disallowedTools exactly
+  "Write,Edit,MultiEdit,NotebookEdit,Bash,WebSearch,WebFetch", max-turns 6,
+  cwd = vault. Never widen without explicit instruction.
+- The agent NEVER writes. It returns an edit plan; LedgeCore checks every path
+  with Vault.resolve(relativePath:) and applies it (Sources/LedgeCore/Plan).
+  Never hand a write tool back to the agent. There is no delete operation.
 - One run per vault at a time. Runner tests use Tests/fixtures/fake-claude.sh,
   never the real CLI.
 
