@@ -37,6 +37,41 @@ final class PlanContractTests: XCTestCase {
         XCTAssertTrue(PlanContract.wrap(prompt: "x", now: now).contains(Vault.dayStamp(on: now)))
     }
 
+    // MARK: - The injected time
+
+    /// A CLI injects a date but never a clock, so an agent asked to stamp a log
+    /// entry copies whatever the worked example shows. Human QA caught exactly
+    /// that: every filed entry came back "00:00Z". Ledge states the time.
+    func testInjectsTheUTCTimeStamp() {
+        let wrapped = PlanContract.wrap(prompt: "x", now: utcDate("2026-08-16T21:40:00Z"))
+        XCTAssertTrue(wrapped.contains("21:40Z"), "contract must state the current UTC time")
+    }
+
+    func testTimeMatchesVaultTimeStamp() {
+        let stamp = Vault.timeStamp(on: now)
+        XCTAssertTrue(PlanContract.wrap(prompt: "x", now: now).contains("\(stamp)Z"))
+    }
+
+    /// The example is what the agent imitates, so its timestamp must be the
+    /// real one — a hardcoded example time is indistinguishable, to the model,
+    /// from an instruction to use that time.
+    func testTheWorkedExampleCarriesTheCurrentTimeNotAFixedOne() throws {
+        let later = utcDate("2026-08-16T21:40:00Z")
+        let plan = try EditPlanExtractor.extract(from: PlanContract.wrap(prompt: "x", now: later))
+        XCTAssertEqual(
+            plan.edits.first,
+            .append(path: "daily/2026-08-16.md", text: "- 21:40Z Something\n")
+        )
+    }
+
+    /// The stamp Ledge asks the agent for and the stamp Ledge writes itself for
+    /// a plain capture must be the same shape, or a day's log reads as two
+    /// different formats depending on how each line got there.
+    func testAgentStampShapeMatchesInstantCapture() {
+        XCTAssertTrue(PlanContract.wrap(prompt: "x", now: now).contains("- HH:MMZ text"))
+        XCTAssertEqual(Vault.timeStamp(on: now).count, 5)
+    }
+
     // MARK: - Contract and decoder agree
 
     func testEveryOperationIsNamed() {
