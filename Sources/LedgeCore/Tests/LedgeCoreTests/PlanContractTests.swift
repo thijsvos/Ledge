@@ -60,8 +60,50 @@ final class PlanContractTests: XCTestCase {
         let plan = try EditPlanExtractor.extract(from: PlanContract.wrap(prompt: "x", now: later))
         XCTAssertEqual(
             plan.edits.first,
-            .append(path: "daily/2026-08-16.md", text: "- 21:40Z Something\n")
+            .replace(
+                path: "daily/2026-08-16.md",
+                find: "## Log\n- 09:00Z An earlier entry",
+                with: "## Log\n- 09:00Z An earlier entry\n- 21:40Z Something"
+            )
         )
+    }
+
+    // MARK: - Filing into the right section
+
+    /// Human QA: a log line filed into a daily note whose `## Log` sits above
+    /// `## Tasks` landed under Tasks, because `append` writes to the end of the
+    /// file and the worked example demonstrated appending to that very note.
+    /// The example must lead with `replace` so the agent imitates the right move.
+    func testTheWorkedExampleLeadsWithReplaceOnTheDailyNote() throws {
+        let plan = try EditPlanExtractor.extract(from: PlanContract.wrap(prompt: "x", now: now))
+        guard case let .replace(path, _, _) = plan.edits.first else {
+            return XCTFail("the daily-note example must be a replace, not an append")
+        }
+        XCTAssertEqual(path, "daily/\(Vault.dayStamp(on: now)).md")
+    }
+
+    /// `append` is still demonstrated — but on a FLAT note, where the end of the
+    /// file genuinely is the right place.
+    func testAppendIsDemonstratedOnlyOnAFlatNote() throws {
+        let plan = try EditPlanExtractor.extract(from: PlanContract.wrap(prompt: "x", now: now))
+        let appends = plan.edits.filter {
+            if case .append = $0 {
+                true
+            } else {
+                false
+            }
+        }
+        XCTAssertEqual(appends.count, 1)
+        XCTAssertFalse(
+            appends[0].path.hasPrefix("daily/"),
+            "appending to the daily note is what put an entry under the wrong heading"
+        )
+    }
+
+    func testContractWarnsThatAppendGoesToTheEnd() {
+        let wrapped = PlanContract.wrap(prompt: "x", now: now)
+        XCTAssertTrue(wrapped.contains("very END of the file"))
+        XCTAssertTrue(wrapped.contains("To file under a heading, use \"replace\""))
     }
 
     /// The stamp Ledge asks the agent for and the stamp Ledge writes itself for
@@ -95,9 +137,13 @@ final class PlanContractTests: XCTestCase {
     func testTheWorkedExampleActuallyDecodes() throws {
         let plan = try EditPlanExtractor.extract(from: PlanContract.wrap(prompt: "x", now: now))
         XCTAssertEqual(plan.edits, [
-            .append(path: "daily/2026-08-14.md", text: "- 09:15Z Something\n"),
+            .replace(
+                path: "daily/2026-08-14.md",
+                find: "## Log\n- 09:00Z An earlier entry",
+                with: "## Log\n- 09:00Z An earlier entry\n- 09:15Z Something"
+            ),
             .create(path: "notes/new-thing.md", content: "# New thing\n"),
-            .replace(path: "notes/index.md", find: "exact existing text", with: "replacement"),
+            .append(path: "notes/a-flat-note.md", text: "- 09:15Z Something\n"),
         ])
     }
 }

@@ -14,6 +14,12 @@
 // The example below therefore carries the real current time, so the shape the
 // agent copies and the value it copies are both right, and both match what
 // InstantCapture writes for a plain capture.
+//
+// The example leads with `replace`, not `append`, for the same reason. Human QA
+// caught that too: a log line filed into a daily note with `## Log` above
+// `## Tasks` landed under Tasks, because append goes to the END of the file and
+// the old example demonstrated appending to exactly that note. The example is
+// the strongest instruction in this contract — it has to model the right move.
 
 import Foundation
 
@@ -34,13 +40,17 @@ public enum PlanContract {
 
         ```json
         {"edits": [
-          {"op": "append", "path": "daily/\(Vault.dayStamp(on: now)).md", "text": "- \(Vault.timeStamp(on: now))Z Something\\n"},
+          {"op": "replace", "path": "daily/\(Vault.dayStamp(on: now)).md", "find": "## Log\\n- 09:00Z An earlier entry", "with": "## Log\\n- 09:00Z An earlier entry\\n- \(Vault.timeStamp(on: now))Z Something"},
           {"op": "create", "path": "notes/new-thing.md", "content": "# New thing\\n"},
-          {"op": "replace", "path": "notes/index.md", "find": "exact existing text", "with": "replacement"}
+          {"op": "append", "path": "notes/a-flat-note.md", "text": "- \(Vault.timeStamp(on: now))Z Something\\n"}
         ]}
         ```
 
         Rules:
+        - "append" adds to the very END of the file. A note with headings usually
+          means the end is the WRONG place — check before you reach for it
+        - To file under a heading, use "replace": find the heading with the last
+          line already under it, and put both back with your new line after them
         - Stamp a log entry with the current time above, as "- HH:MMZ text" — never
           invent a time and never copy the one in the example
         - Paths are relative to the vault root and must end in .md
