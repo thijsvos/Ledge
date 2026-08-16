@@ -136,7 +136,11 @@ final class CaptureCoordinator {
                     modelChoice: modelChoice
                 )
             } else {
-                island.transition(to: .peek(.info(message: "Agent runs arrive in Phase 3")))
+                // Unreachable in the shipping app — NotchWindowController wires
+                // the run controller at launch. Reached only by a coordinator
+                // built on its own in tests, so the message describes the real
+                // condition rather than promising a feature that already exists.
+                island.transition(to: .peek(.info(message: "Agent runs unavailable")))
             }
         case let .instant(target, text):
             // Enter in an empty (or all-whitespace) field is a dismiss

@@ -51,7 +51,7 @@ final class AgentRunController: AgentRunSubmitting {
     /// allows one run per vault at a time. Deliberately in memory only: undo
     /// is an "oops, immediately" affordance, and a record that outlived the
     /// app would invite undoing a run the vault has moved well past.
-    private var lastUndo: (record: RunUndoRecord, vaultPath: String)?
+    private var lastUndo: StoredUndo?
     private var runnerBinaryPath: String?
     private var runnerModel: String?
     private var runnerEffort: String?
@@ -835,7 +835,7 @@ final class AgentRunController: AgentRunSubmitting {
         if case let .applied(applied) = result, !applied.isEmpty,
            let vaultPath = runnerVaultPath
         {
-            lastUndo = (record: applied.undo, vaultPath: vaultPath)
+            lastUndo = StoredUndo(record: applied.undo, vaultPath: vaultPath)
         }
         return result
     }
@@ -869,24 +869,23 @@ final class AgentRunController: AgentRunSubmitting {
     /// field away. Routing this through it swallowed all three messages —
     /// undo worked and said nothing.
     func undoLastRun() {
-        guard let lastUndo else {
-            return userPeek(.info(message: "Nothing to undo"))
+        // The eligibility rule itself lives in LedgeCore (`RunUndo.decide`), so
+        // it has tests — this layer only maps the answer onto a peek. It must
+        // compare against the CONFIGURED vault, not `runnerVaultPath`, which is
+        // assigned only when a run is submitted: comparing to that meant
+        // switching vaults in Settings never refused, which is what human QA hit.
+        switch RunUndo.decide(stored: lastUndo, configuredVaultPath: configuredVaultPath()) {
+        case .nothingRecorded:
+            userPeek(.info(message: "Nothing to undo"))
+        case .recordedForAnotherVault:
+            lastUndo = nil
+            userPeek(.info(message: "Nothing to undo in this vault"))
+        case let .restore(record):
+            let restored = RunUndo.restore(record)
+            lastUndo = nil
+            logger.info("undid last run: \(restored) file(s) restored")
+            userPeek(.info(message: "Undone — \(restored) file\(restored == 1 ? "" : "s") restored"))
         }
-        // Against the CONFIGURED vault, not `runnerVaultPath`. The latter is
-        // only assigned when a run is submitted (`ensureRunner`), so comparing
-        // to it meant switching vaults in Settings never tripped this guard —
-        // the record stayed live until something else ran. Human QA hit exactly
-        // that. Nothing unsafe followed (undo restores through absolute URLs, so
-        // it writes back into the vault the run happened in), but the refusal a
-        // user was promised never appeared.
-        guard lastUndo.vaultPath == configuredVaultPath() else {
-            self.lastUndo = nil
-            return userPeek(.info(message: "Nothing to undo in this vault"))
-        }
-        let restored = RunUndo.restore(lastUndo.record)
-        self.lastUndo = nil
-        logger.info("undid last run: \(restored) file(s) restored")
-        userPeek(.info(message: "Undone — \(restored) file\(restored == 1 ? "" : "s") restored"))
     }
 
     private func resumeAction(sessionID: String?) -> ResumeAction? {

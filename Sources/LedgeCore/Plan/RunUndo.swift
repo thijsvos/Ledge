@@ -55,7 +55,55 @@ public struct RunUndoRecord: Equatable, Sendable {
     }
 }
 
+/// One run's undo record together with the vault it belongs to. The App layer
+/// keeps at most one of these in memory (§2.4 — one run per vault at a time).
+public struct StoredUndo: Equatable, Sendable {
+    public let record: RunUndoRecord
+    public let vaultPath: String
+
+    public init(record: RunUndoRecord, vaultPath: String) {
+        self.record = record
+        self.vaultPath = vaultPath
+    }
+}
+
+/// What `/undo` should do, decided before anything touches disk.
+public enum UndoDecision: Equatable, Sendable {
+    /// No run has been applied since launch, or one was already undone.
+    case nothingRecorded
+    /// A record exists but belongs to a different vault than the one now
+    /// configured. Refuse and drop it.
+    case recordedForAnotherVault
+    case restore(RunUndoRecord)
+}
+
 public enum RunUndo {
+    /// Whether the stored record may be applied to the vault currently
+    /// configured. Pure, so the rule is testable — the App layer only maps the
+    /// answer onto a peek.
+    ///
+    /// This lives here because getting it wrong is invisible: human QA found
+    /// the App layer comparing against the last RUN's vault instead of the
+    /// configured one, so switching vaults in Settings never refused. Paths are
+    /// tilde-expanded and standardized first, so a trailing slash or a `..`
+    /// segment cannot make the same folder look like two.
+    public static func decide(stored: StoredUndo?, configuredVaultPath: String?) -> UndoDecision {
+        guard let stored else { return .nothingRecorded }
+        guard let configuredVaultPath, !configuredVaultPath.isEmpty else {
+            return .recordedForAnotherVault
+        }
+        guard normalized(stored.vaultPath) == normalized(configuredVaultPath) else {
+            return .recordedForAnotherVault
+        }
+        return .restore(stored.record)
+    }
+
+    /// Deliberately NOT symlink-resolved, matching `Vault.root`: the vault is
+    /// identified by the path the user chose, not by where it happens to land.
+    private static func normalized(_ path: String) -> String {
+        URL(fileURLWithPath: (path as NSString).expandingTildeInPath).standardizedFileURL.path
+    }
+
     /// Restores every entry. Files the run created are removed; files it
     /// changed are written back byte for byte.
     ///

@@ -38,7 +38,8 @@ final class ResumePolicyTests: XCTestCase {
     }
 
     /// Shell-injection guard: anything outside `^[A-Za-z0-9-]+$` is refused
-    /// and flagged for clearing (§ decision: invalid stored = nil + clear).
+    /// and flagged for clearing — a stored ID that cannot be valid is not worth
+    /// keeping, and §6 hands this value to a shell via the resume script.
     func testEnabledWithInvalidStoredIsNilAndCleared() {
         for bad in ["abc def", "abc$(touch /tmp/x)", "id'quote", "sessão", "a_b", "x;y"] {
             let choice = ResumePolicy.pickResumeSessionID(enabled: true, stored: bad)

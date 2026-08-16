@@ -114,6 +114,20 @@ stream_file="$scratch/launch-stream.log"
 # background for just the launch window and read the app's own "launched"
 # line (subsystem app.ledge, category perf — emitted once in
 # applicationDidFinishLaunching).
+# One discarded launch first. The FIRST execution of a freshly signed binary
+# pays one-time costs a user pays once at install and never again: signature
+# validation and dyld closure generation. Measuring it made `make perf` fail
+# spuriously right after `make build` — which is the order the definition of
+# done prescribes, so it failed nearly every time (observed 497 ms cold, then
+# 192/80/113 ms on the same unchanged binary).
+note "perf-check: warming the binary (one discarded launch)…"
+"$APP_BINARY" -hasRunOnboarding YES >/dev/null 2>&1 &
+warmup_pid=$!
+spawned_pids+=("$warmup_pid")
+sleep 1
+kill "$warmup_pid" 2>/dev/null || true
+wait "$warmup_pid" 2>/dev/null || true
+
 note "perf-check: measuring cold launch…"
 /usr/bin/log stream --style compact --level info \
   --predicate 'subsystem == "app.ledge"' > "$stream_file" 2>/dev/null &
