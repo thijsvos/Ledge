@@ -6,8 +6,11 @@
 #                           line, timed via the line's OWN logd timestamp so
 #                           `log stream` delivery latency can't false-fail;
 #                           WARN-only when the line can't be captured)
-#   idle CPU    ≤ 0.1 %    (ps cputime/etime deltas across PERF_SAMPLE_SECS;
-#                           the app has ZERO timers and ZERO polling when idle)
+#   idle CPU    ≤ 0.1 %    (ps cputime/etime deltas, MEDIAN of three
+#                           PERF_SAMPLE_SECS windows — one window is 60 ms of
+#                           CPU at this budget, which ambient system load flips
+#                           on its own; the app has ZERO timers and ZERO
+#                           polling when idle)
 #   RAM         ≤ 50 MB    (ps rss primarily; when rss alone exceeds the
 #                           budget — on macOS 13+ it counts resident SHARED
 #                           dyld-cache pages, a ~60-80 MB floor no AppKit app
@@ -184,7 +187,7 @@ kill "$stream_pid" 2>/dev/null || true
 wait "$stream_pid" 2>/dev/null || true
 
 # ------------------------------------------------- (c) idle CPU  (d) RAM
-note "perf-check: sampling idle CPU for ${SAMPLE_SECS}s (fresh instance, 5s settle)…"
+note "perf-check: sampling idle CPU — 3 × ${SAMPLE_SECS}s (fresh instance, 5s settle)…"
 "$APP_BINARY" -hasRunOnboarding YES >/dev/null 2>&1 &
 idle_pid=$!
 spawned_pids+=("$idle_pid")
@@ -195,14 +198,24 @@ if ! kill -0 "$idle_pid" 2>/dev/null; then
   exit 2
 fi
 
-cpu1=$(to_secs "$(ps -o cputime= -p "$idle_pid" | tr -d ' ')")
-et1=$(to_secs "$(ps -o etime= -p "$idle_pid" | tr -d ' ')")
-sleep "$SAMPLE_SECS"
-cpu2=$(to_secs "$(ps -o cputime= -p "$idle_pid" | tr -d ' ')")
-et2=$(to_secs "$(ps -o etime= -p "$idle_pid" | tr -d ' ')")
-
-cpu_pct=$(awk -v c1="$cpu1" -v c2="$cpu2" -v e1="$et1" -v e2="$et2" \
-  'BEGIN { d = e2 - e1; if (d <= 0) d = 1; printf "%.4f", (c2 - c1) / d * 100 }')
+# Median of three consecutive windows against the SAME instance, rather than
+# one. The budget is unchanged — this only removes ambient load from the
+# verdict. A 0.1 % budget over a 60 s window is 60 ms of CPU, so a busy machine
+# (Spotlight after a build, a menu-bar agent spinning) flips it on its own:
+# three back-to-back windows measured 0.050 / 0.100 / 0.133 % on an idle app.
+# A real regression raises all three, so the median still fails.
+cpu_samples=()
+for _ in 1 2 3; do
+  cpu1=$(to_secs "$(ps -o cputime= -p "$idle_pid" | tr -d ' ')")
+  et1=$(to_secs "$(ps -o etime= -p "$idle_pid" | tr -d ' ')")
+  sleep "$SAMPLE_SECS"
+  cpu2=$(to_secs "$(ps -o cputime= -p "$idle_pid" | tr -d ' ')")
+  et2=$(to_secs "$(ps -o etime= -p "$idle_pid" | tr -d ' ')")
+  cpu_samples+=("$(awk -v c1="$cpu1" -v c2="$cpu2" -v e1="$et1" -v e2="$et2" \
+    'BEGIN { d = e2 - e1; if (d <= 0) d = 1; printf "%.4f", (c2 - c1) / d * 100 }')")
+done
+cpu_pct=$(printf '%s\n' "${cpu_samples[@]}" | sort -n | sed -n '2p')
+note "perf-check: idle CPU samples ${cpu_samples[*]} → median ${cpu_pct} %"
 if awk -v p="$cpu_pct" -v b="$CPU_BUDGET_PCT" 'BEGIN { exit !(p <= b) }'; then
   cpu_result="PASS"
 else
