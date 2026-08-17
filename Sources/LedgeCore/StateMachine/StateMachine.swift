@@ -29,7 +29,8 @@ public struct ResumeAction: Sendable, Equatable {
     }
 }
 
-/// What a 2.5 s peek banner shows.
+/// What a peek banner shows. Most auto-dismiss after 2.5 s; failures wait for
+/// the user (see `expires`).
 public enum PeekContent: Sendable, Equatable {
     case success(filesEdited: Int, duration: TimeInterval)
     /// `configuration` marks failures whose cause is missing/invalid setup
@@ -47,6 +48,22 @@ public extension PeekContent {
     static func failure(message: String, resume: ResumeAction?) -> PeekContent {
         .failure(message: message, resume: resume, configuration: false)
     }
+
+    /// Whether this peek auto-dismisses after `peekDuration` (§4: 2.5 s).
+    ///
+    /// Failures do not. They are the only peeks carrying something to act on —
+    /// "Open in Terminal", "Copy command", "Open Settings…" — and human QA
+    /// (2026-08-17) found 2.5 s too short to read the message and hit a button.
+    /// A success or a queue position has nothing to click, so it still gets out
+    /// of the way on its own. A sticky failure is dismissed the same way
+    /// anything else is: Esc, a click outside, or the next thing that happens.
+    var expires: Bool {
+        if case .failure = self {
+            false
+        } else {
+            true
+        }
+    }
 }
 
 /// The island's UI state (§4).
@@ -59,7 +76,8 @@ public enum IslandState: Equatable, Sendable {
     case open
     /// Collapsed + animated status dot at the notch edge.
     case running(RunHandle)
-    /// Banner for 2.5 s: success / failure / queued / info.
+    /// Banner: success / queued / info clear themselves after 2.5 s; a failure
+    /// stays until dismissed, because it is the one carrying buttons.
     case peek(PeekContent)
 }
 
@@ -151,7 +169,7 @@ public final class IslandController {
         if case let .running(handle) = newState {
             liveRun = handle
         }
-        if case .peek = newState {
+        if case let .peek(content) = newState, content.expires {
             schedulePeekExpiry()
         }
         logger.info(

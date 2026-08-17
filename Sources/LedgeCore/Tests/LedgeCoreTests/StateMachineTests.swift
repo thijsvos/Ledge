@@ -175,6 +175,60 @@ final class StateMachineTests: XCTestCase {
         XCTAssertEqual(controller.state, .running(handle))
     }
 
+    // MARK: - Failure peeks are sticky
+
+    /// Human QA (2026-08-17): 2.5 s was too short to read a failure and hit
+    /// "Open in Terminal" before the peek vanished. Failures are the only peeks
+    /// carrying something to act on, so they no longer auto-dismiss.
+    func testFailurePeekDoesNotExpire() async throws {
+        let controller = IslandController(peekDuration: 0.05)
+        controller.transition(to: .peek(.failure(message: "boom", resume: nil)))
+        try await Task.sleep(for: .milliseconds(400))
+        XCTAssertEqual(
+            controller.state,
+            .peek(.failure(message: "boom", resume: nil)),
+            "a failure peek must wait for the user, not a timer"
+        )
+    }
+
+    func testConfigurationFailurePeekAlsoStays() async throws {
+        let controller = IslandController(peekDuration: 0.05)
+        let content = PeekContent.failure(message: "No vault set", resume: nil, configuration: true)
+        controller.transition(to: .peek(content))
+        try await Task.sleep(for: .milliseconds(400))
+        XCTAssertEqual(controller.state, .peek(content), "its \"Open Settings…\" needs clicking too")
+    }
+
+    /// A sticky failure must still be dismissible the ordinary ways, or it
+    /// would strand the island.
+    func testFailurePeekStillYieldsToTheNextTransition() {
+        let controller = IslandController(peekDuration: 60)
+        controller.transition(to: .peek(.failure(message: "boom", resume: nil)))
+        controller.transition(to: .collapsed)
+        XCTAssertEqual(controller.state, .collapsed)
+    }
+
+    /// Everything without a button still gets out of the way on its own.
+    func testNonFailurePeeksStillExpire() async throws {
+        for content in [
+            PeekContent.success(filesEdited: 1, duration: 2),
+            .info(message: "Nothing to change"),
+            .queued(position: 1),
+        ] {
+            let controller = IslandController(peekDuration: 0.05)
+            controller.transition(to: .peek(content))
+            try await Task.sleep(for: .milliseconds(400))
+            XCTAssertEqual(controller.state, .collapsed, "\(content) should have expired")
+        }
+    }
+
+    func testExpiresFlagMatchesTheCases() {
+        XCTAssertFalse(PeekContent.failure(message: "x", resume: nil).expires)
+        XCTAssertTrue(PeekContent.success(filesEdited: 0, duration: 0).expires)
+        XCTAssertTrue(PeekContent.info(message: "x").expires)
+        XCTAssertTrue(PeekContent.queued(position: 1).expires)
+    }
+
     // MARK: - Peek expiry
 
     /// The Enter-time start peek's exact shape: transition into `.running`

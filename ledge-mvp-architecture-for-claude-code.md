@@ -96,7 +96,9 @@ enum IslandState: Equatable {
   case hover                // grown ~10pt, affordance hint
   case open                 // capture field visible, panel is key
   case running(RunHandle)   // collapsed + animated status dot at notch edge
-  case peek(PeekContent)    // banner for 2.5s: success / failure / queued info
+  case peek(PeekContent)    // banner: success / queued / info auto-expire in
+                            // 2.5s; FAILURE peeks are sticky — they carry the
+                            // only buttons worth clicking (QA, 2026-08-17)
 }
 ```
 

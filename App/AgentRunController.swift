@@ -809,6 +809,11 @@ final class AgentRunController: AgentRunSubmitting {
             showPlanPeek(summary: summary, plan: plan)
         case let .failure(failure):
             persistSessionID(failure.sessionID)
+            // A failed run used to leave nothing but its `spawned claude pid …`
+            // line, so "my run just failed" had no trace to diagnose from.
+            logger.error(
+                "run failed: \(Self.headline(for: failure), privacy: .public)"
+            )
             showPeek(.failure(
                 message: Self.message(for: failure),
                 resume: resumeAction(sessionID: failure.sessionID)
