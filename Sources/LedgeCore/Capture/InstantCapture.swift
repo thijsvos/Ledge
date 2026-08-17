@@ -105,8 +105,8 @@ public enum InstantCapture {
     // MARK: - Daily note creation
 
     /// Creates `vault/daily/` if needed and seeds the note: template contents
-    /// with `{{date}}` substituted when the template exists, else a minimal
-    /// `# YYYY-MM-DD\n` header.
+    /// with its placeholders filled (see `fillingPlaceholders`) when the
+    /// template exists, else a minimal `# YYYY-MM-DD\n` header.
     ///
     /// Never truncates: the write is `.withoutOverwriting`, so losing the
     /// creation race to an external writer (register's UI, a sync client —
@@ -123,7 +123,7 @@ public enum InstantCapture {
         let seed: String
         if FileManager.default.fileExists(atPath: vault.templatesDailyURL.path) {
             let template = try String(contentsOf: vault.templatesDailyURL, encoding: .utf8)
-            seed = template.replacingOccurrences(of: "{{date}}", with: day)
+            seed = fillingPlaceholders(in: template, now: now)
         } else {
             seed = "# \(day)\n"
         }
@@ -132,6 +132,47 @@ public enum InstantCapture {
         } catch let error as CocoaError where error.code == .fileWriteFileExists {
             // Lost the creation race: the other writer's content wins.
         }
+    }
+
+    /// Fills a daily template's placeholders. Pure, so the substitution rule is
+    /// testable without a disk.
+    ///
+    /// Two placeholder styles, because register's own template uses one and
+    /// §5 originally specified the other:
+    ///
+    /// * `{{date}}` / `{{time}}` / `{{ulid}}` — explicit, substituted anywhere.
+    /// * The bare word `TEMPLATE` as a frontmatter VALUE — register's shipped
+    ///   template writes `id: TEMPLATE`, `title: TEMPLATE`, and so on. Each is
+    ///   filled from its own key, so `id:` gets a minted ULID while `title:`
+    ///   and `created:` get the day and `modified:` the full timestamp.
+    ///
+    /// Human QA (2026-08-17) found the second style passing through untouched:
+    /// with register closed there was nothing to repair the note afterwards, so
+    /// Ledge left `id: TEMPLATE` on disk. An unknown key keeps the day stamp,
+    /// which is wrong far less often than the literal word TEMPLATE.
+    static func fillingPlaceholders(in template: String, now: Date) -> String {
+        let day = Vault.dayStamp(on: now)
+        let timestamp = "\(day)T\(Vault.timeStamp(on: now)):00Z"
+
+        var filled = template
+            .replacingOccurrences(of: "{{date}}", with: day)
+            .replacingOccurrences(of: "{{time}}", with: "\(Vault.timeStamp(on: now))Z")
+        while let found = filled.range(of: "{{ulid}}") {
+            filled.replaceSubrange(found, with: ULID.make(at: now))
+        }
+
+        return filled.components(separatedBy: "\n").map { line -> String in
+            guard let colon = line.firstIndex(of: ":") else { return line }
+            let value = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+            guard value == "TEMPLATE" else { return line }
+            let key = line[..<colon].trimmingCharacters(in: .whitespaces).lowercased()
+            let replacement = switch key {
+            case "id": ULID.make(at: now)
+            case "modified", "updated": timestamp
+            default: day
+            }
+            return "\(line[..<colon]): \(replacement)"
+        }.joined(separator: "\n")
     }
 
     // MARK: - Append
