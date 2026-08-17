@@ -100,7 +100,7 @@ enum IslandState: Equatable {
 }
 ```
 
-All mutations go through `IslandController.transition(to:)` (`@MainActor`), which emits `os_signpost` intervals (subsystem `app.ledge`, category `perf`). One shared spring: `.spring(response: 0.32, dampingFraction: 0.78)`. Hover debounce 80 ms; Esc / click-outside (local + global monitor) collapses; `running` and `peek` may overlay while user works — they never steal focus.
+All mutations go through `IslandController.transition(to:)` (`@MainActor`), which emits `os_signpost` intervals (subsystem `app.ledge`, category `perf`). One shared spring: `.spring(response: 0.18, dampingFraction: 0.85)`. Hover debounce 40 ms. (Both retuned in human QA on 2026-08-17, from `0.32/0.78` and 80 ms. The transition body itself measures 0.02–0.15 ms, so everything a user perceives as "not instant" lives in these two numbers and nowhere else.) Esc / click-outside (local + global monitor) collapses; `running` and `peek` may overlay while user works — they never steal focus.
 
 ---
 

@@ -1,12 +1,21 @@
 import LedgeCore
 import SwiftUI
 
-/// Shared motion constants (§4): exactly one spring everywhere, 80 ms hover
+/// Shared motion constants (§4): exactly one spring everywhere, 55 ms hover
 /// debounce. Reduced motion (§7) is implemented HERE and only here — no view
 /// hand-rolls its own fallback.
+///
+/// Tuned during human QA (2026-08-17). The state machine was never the cost —
+/// a transition's synchronous body measures 0.02–0.15 ms — so "not quite
+/// instant" was entirely these two numbers: a spring response of 0.32 s, and a
+/// debounce during which nothing moves at all. Both came down; the spring's
+/// damping went up slightly to keep a shorter response from reading as bouncy.
 enum IslandMotion {
-    static let spring = Animation.spring(response: 0.32, dampingFraction: 0.78)
-    static let hoverDebounce = Duration.milliseconds(80)
+    static let spring = Animation.spring(response: 0.18, dampingFraction: 0.85)
+    /// The dead period before a hover is believed. Long enough that a pointer
+    /// crossing the notch on its way elsewhere does not make the island twitch,
+    /// short enough that a deliberate hover feels answered.
+    static let hoverDebounce = Duration.milliseconds(40)
     /// ~150 ms cross-fade used for every state change when the system's
     /// reduce-motion accessibility setting is on — no spring overshoot.
     static let reducedMotionFade = Animation.easeInOut(duration: 0.15)
