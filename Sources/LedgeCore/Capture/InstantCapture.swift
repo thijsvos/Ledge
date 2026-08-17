@@ -136,29 +136,59 @@ public enum InstantCapture {
 
     // MARK: - Append
 
-    /// Appends exactly `- HH:MMZ <text>\n` (UTC, zero-padded), preceded by a
-    /// repair `\n` when the file's last byte is not a newline. One open, one
-    /// write, one close. Returns the number of bytes written.
+    /// Writes exactly one `- HH:MMZ <text>` line (UTC, zero-padded) into the
+    /// note, under `## Log` when the note has one. Returns the bytes added.
+    ///
+    /// A note built from a register daily template ends with `## Tasks`, so the
+    /// original end-of-file append filed every captured thought as a task —
+    /// human QA hit this on the very first capture. Where a heading exists the
+    /// entry belongs under it, which is the same rule `PlanContract` gives the
+    /// agent; a note with no `## Log` still appends at the end, byte for byte
+    /// as before.
+    ///
+    /// This is now read-modify-write rather than a bare append, so it goes out
+    /// atomically (write-then-rename): another writer (§1) can lose an
+    /// interleaved edit, but never sees a half-written note.
     private static func appendEntry(_ text: String, to url: URL, now: Date) throws -> Int {
-        let handle = try FileHandle(forUpdating: url)
-        defer { try? handle.close() }
+        let existing = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        let entry = "- \(Vault.timeStamp(on: now))Z \(text)"
+        let updated = inserting(entry, into: existing)
+        try Data(updated.utf8).write(to: url, options: .atomic)
+        return max(0, updated.utf8.count - existing.utf8.count)
+    }
 
-        var needsLeadingNewline = false
-        let end = try handle.seekToEnd()
-        if end > 0 {
-            try handle.seek(toOffset: end - 1)
-            let lastByte = try handle.read(upToCount: 1)
-            needsLeadingNewline = lastByte != Data([0x0A])
+    /// Pure so the placement rule is testable without touching a disk.
+    ///
+    /// `entry` carries no trailing newline. The insertion point is the end of
+    /// the `## Log` section — just before the next `##` heading, backing up over
+    /// blank lines so the entry sits directly beneath the last one rather than
+    /// after the gap. With no `## Log`, appends at the end and repairs a missing
+    /// final newline, exactly as the pre-QA behaviour did.
+    static func inserting(_ entry: String, into contents: String) -> String {
+        var lines = contents.components(separatedBy: "\n")
+
+        guard let logIndex = lines.firstIndex(where: {
+            $0.trimmingCharacters(in: .whitespaces).lowercased() == "## log"
+        }) else {
+            var result = contents
+            if !result.isEmpty, !result.hasSuffix("\n") {
+                result += "\n"
+            }
+            return result + entry + "\n"
         }
 
-        var entry = Data()
-        if needsLeadingNewline {
-            entry.append(0x0A)
+        var insertAt = lines.count
+        if let next = lines[(logIndex + 1)...].firstIndex(where: {
+            $0.trimmingCharacters(in: .whitespaces).hasPrefix("##")
+        }) {
+            insertAt = next
         }
-        entry.append(contentsOf: "- \(Vault.timeStamp(on: now))Z \(text)\n".utf8)
-
-        try handle.seekToEnd()
-        try handle.write(contentsOf: entry)
-        return entry.count
+        while insertAt > logIndex + 1,
+              lines[insertAt - 1].trimmingCharacters(in: .whitespaces).isEmpty
+        {
+            insertAt -= 1
+        }
+        lines.insert(entry, at: insertAt)
+        return lines.joined(separator: "\n")
     }
 }

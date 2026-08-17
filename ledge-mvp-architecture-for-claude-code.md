@@ -113,7 +113,7 @@ All mutations go through `IslandController.transition(to:)` (`@MainActor`), whic
 
 **InstantCapture** (`Capture/InstantCapture.swift`):
 
-* Daily target: `vault/daily/YYYY-MM-DD.md`, date in **UTC** (register's convention). If missing, create it from `vault/templates/daily.md` when that exists, else create with a minimal `# YYYY-MM-DD` header. Append `- HH:MMZ <text>\n` (UTC time).
+* Daily target: `vault/daily/YYYY-MM-DD.md`, date in **UTC** (register's convention). If missing, create it from `vault/templates/daily.md` when that exists, else create with a minimal `# YYYY-MM-DD` header. Write `- HH:MMZ <text>` (UTC time) at the end of the note's `## Log` section, or at end-of-file when it has none. (Amended in human QA on 2026-08-17: end-of-file append was the original rule, but a register daily template ends with `## Tasks`, so every captured thought was filed as a task. Same placement rule the agent gets from `PlanContract` — a note with headings means the end of the file is the wrong place.)
 * Inbox target: the note whose filename begins with `000` at the vault root (glob `000*.md`); if absent, fall back to the daily note and say so in the peek.
 * Atomic append (open, write, close); total Enter→file-on-disk budget 50 ms. register's own watcher repaints its UI within 100 ms — Ledge does nothing further.
 * Unit tests run against `Tests/fixtures/vault/` covering: UTC date rollover, template-based creation, inbox glob, missing-inbox fallback, unicode text.
