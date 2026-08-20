@@ -92,11 +92,23 @@ Sources/LedgeCore/   all logic, no AppKit or SwiftUI — everything testable
   Plan/         edit plans: extract, validate, apply, undo
   Runner/       the claude child process and its stream
   Vault/        vault validation and the path fence
-docs/           human QA checklist and results
+docs/           design notes for a future plugin system
 ```
 
 `ledge-mvp-architecture-for-claude-code.md` is the spec; `CLAUDE.md` is the
 contract for agents working on this repo.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). The short version: logic belongs in
+`Sources/LedgeCore` where it can be tested, and `make format && make build &&
+make test && make perf` all pass before a commit.
+
+## Security
+
+The guarantees above are enforced in code and covered by tests.
+[SECURITY.md](SECURITY.md) states them precisely and explains how to report a
+vulnerability.
 
 ## Licence
 
