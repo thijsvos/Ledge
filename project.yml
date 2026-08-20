@@ -47,8 +47,13 @@ targets:
           # permissions to the code signature, and ad-hoc signatures change on
           # every rebuild — macOS re-prompted for vault access after each
           # `make run`. A stable Apple Development identity makes grants stick.
+          #
+          # The team comes from the LEDGE_DEVELOPMENT_TEAM environment
+          # variable so no one's Apple team ID is committed, and so a clone
+          # builds against its own. `make` reads it from Local.makefile
+          # (gitignored) if present; see README.
           CODE_SIGN_IDENTITY: "Apple Development"
-          DEVELOPMENT_TEAM: 74Q48XUN7W
+          DEVELOPMENT_TEAM: ${LEDGE_DEVELOPMENT_TEAM}
 
 schemes:
   Ledge:

@@ -45,13 +45,13 @@ final class ResumeScriptWriterTests: XCTestCase {
     /// Apostrophes in the vault path must be quoted with the '\'' idiom.
     func testApostropheInVaultPathIsEscaped() throws {
         let url = try ResumeScriptWriter.writeResumeScript(
-            vaultPath: "/Users/test/thijs's vault",
+            vaultPath: "/Users/test/sam's vault",
             sessionID: "abc-123",
             directory: directory
         )
         XCTAssertEqual(
             try String(contentsOf: url, encoding: .utf8),
-            "cd '/Users/test/thijs'\\''s vault' && claude --resume 'abc-123'\n"
+            "cd '/Users/test/sam'\\''s vault' && claude --resume 'abc-123'\n"
         )
     }
 
