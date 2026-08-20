@@ -37,8 +37,19 @@ public enum EditPlanExtractor {
         let bare = balancedObjects(in: message)
         var lastFailure: String?
 
-        for candidate in fenced.reversed() + bare.reversed() {
-            guard let data = candidate.data(using: .utf8) else { continue }
+        // Spelled with explicit `Array(...)` rather than
+        // `fenced.reversed() + bare.reversed()`: `reversed()` has two overloads
+        // (Sequence's returning an Array, BidirectionalCollection's returning a
+        // ReversedCollection) and concatenating two of them is ambiguous on the
+        // Swift 6.0 this package declares. It happened to resolve on a newer
+        // toolchain, which is how it reached main — CI on the declared minimum
+        // caught it.
+        let candidates: [String] = Array(fenced.reversed()) + Array(bare.reversed())
+
+        for candidate in candidates {
+            // `Data(_:)` over the UTF-8 view, not `data(using:)`: a String is
+            // always representable as UTF-8, so there is no optional to unwrap.
+            let data = Data(candidate.utf8)
             do {
                 return try JSONDecoder().decode(EditPlan.self, from: data)
             } catch {
