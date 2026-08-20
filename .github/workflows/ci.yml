@@ -12,9 +12,18 @@ concurrency:
 jobs:
   test:
     name: Test, lint, build
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
+
+      # Printed so a toolchain-shaped failure is diagnosable from the log
+      # alone. The first CI run failed on two constructs a newer compiler
+      # accepts and the runner's did not, and neither log said which Swift
+      # was in use.
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          swift --version
 
       # LedgeCore is a standalone SPM package: no Xcode project, no signing
       # identity, no Apple account. This is the gate that matters and it is
