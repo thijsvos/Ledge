@@ -1,5 +1,9 @@
 # Ledge
 
+[![CI](https://github.com/thijsvos/Ledge/actions/workflows/ci.yml/badge.svg)](https://github.com/thijsvos/Ledge/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+![Platform: macOS 14+](https://img.shields.io/badge/Platform-macOS%2014%2B-lightgrey.svg)
+
 A macOS notch capture app for a [register](https://github.com/thijsvos/register)
 markdown vault. Type into the notch and the thought is filed; prefix with `/`
 and your locally installed Claude Code CLI does the note-work.
