@@ -10,7 +10,12 @@ packages:
     path: Sources/LedgeCore
   KeyboardShortcuts:
     url: https://github.com/sindresorhus/KeyboardShortcuts
-    from: 2.0.0
+    # Pinned exactly, not `from:`. The SPM lockfile that would normally pin this
+    # lives inside the generated .xcodeproj, which is gitignored — so a range
+    # would leave a clone resolving whatever is newest that day. This package
+    # installs a global hotkey monitor; it is not something to float. Bump
+    # deliberately and re-run the gate.
+    exactVersion: 2.4.0
 
 targets:
   Ledge:

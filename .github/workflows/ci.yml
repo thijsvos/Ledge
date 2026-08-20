@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test, lint, build
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      # LedgeCore is a standalone SPM package: no Xcode project, no signing
+      # identity, no Apple account. This is the gate that matters and it is
+      # also the one that runs anywhere.
+      - name: Test LedgeCore
+        run: swift test --package-path Sources/LedgeCore
+
+      - name: Install tools
+        run: brew install swiftformat xcodegen
+
+      - name: Check formatting
+        run: swiftformat --lint .
+
+      # Unsigned: DEVELOPMENT_TEAM comes from LEDGE_DEVELOPMENT_TEAM, which is
+      # unset here by design (it lives in a gitignored Local.makefile), so the
+      # app target is built without signing. Proves App/ and UI/ still compile —
+      # they are outside the SPM package and nothing else covers them.
+      - name: Build the app (unsigned)
+        run: |
+          xcodegen generate
+          xcodebuild -scheme Ledge -configuration Debug \
+            -derivedDataPath .build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+            build
+
+      # Both flags exit non-zero on failure, so this catches a launch path
+      # broken by a refactor without needing a window server.
+      - name: Verify launch flags
+        run: |
+          BIN=.build/Build/Products/Debug/Ledge.app/Contents/MacOS/Ledge
+          "$BIN" --dump-geometry > /dev/null
+          "$BIN" --render-preview open "$RUNNER_TEMP/preview.png"
+          test -s "$RUNNER_TEMP/preview.png"
