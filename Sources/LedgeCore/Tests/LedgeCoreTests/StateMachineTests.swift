@@ -297,15 +297,23 @@ final class StateMachineTests: XCTestCase {
         XCTAssertEqual(controller.state, .open, "expiry must not fire after leaving .peek")
     }
 
+    /// Unlike its neighbours, this test needs a sleep to land BEFORE a deadline
+    /// rather than after one, so `Task.sleep` overshooting breaks it instead of
+    /// being harmless. The margins are therefore wide on purpose — 300–400 ms
+    /// rather than the 80 ms they used to be, which CI on a shared runner
+    /// tripped while this machine never did. Two constraints have to hold:
+    /// 700 + 700 > 1000, so the FIRST clock would have fired by the assertion;
+    /// and 700 < 1000, so the restarted one has not. Do not tighten these to
+    /// speed the suite up — the two extra seconds buy the test's reliability.
     func testReplacingPeekRestartsExpiry() async throws {
-        let controller = IslandController(peekDuration: 0.2)
+        let controller = IslandController(peekDuration: 1.0)
         controller.transition(to: .peek(.info(message: "first")))
-        try await Task.sleep(for: .milliseconds(120))
+        try await Task.sleep(for: .milliseconds(700))
         controller.transition(to: .peek(.info(message: "second")))
-        try await Task.sleep(for: .milliseconds(120))
+        try await Task.sleep(for: .milliseconds(700))
         // First clock would have fired by now; the restarted one has not.
         XCTAssertEqual(controller.state, .peek(.info(message: "second")))
-        try await Task.sleep(for: .milliseconds(500))
+        try await Task.sleep(for: .milliseconds(1500))
         XCTAssertEqual(controller.state, .collapsed)
     }
 }
