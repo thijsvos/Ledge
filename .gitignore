@@ -6,3 +6,4 @@ DerivedData/
 xcuserdata/
 *.xcuserstate
 Local.makefile
+docs/human-qa.md
