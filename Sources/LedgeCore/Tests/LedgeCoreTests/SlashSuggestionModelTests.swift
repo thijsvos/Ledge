@@ -38,7 +38,7 @@ final class SlashSuggestionModelTests: XCTestCase {
         model.text = "/c"
         XCTAssertEqual(model.query, "c")
         // Declaration order, not alphabetical: checks before cancel.
-        XCTAssertEqual(model.matches, [.checks, .cancel])
+        XCTAssertEqual(model.matches, [.checks, .cancel, .changes])
     }
 
     func testSpaceAfterTokenHidesTheList() {
@@ -101,8 +101,8 @@ final class SlashSuggestionModelTests: XCTestCase {
 
     func testAmbiguousQueryDoesNotAutoCompleteOnEnter() {
         let model = SlashSuggestionModel()
-        model.text = "/c" // checks + cancel
-        XCTAssertEqual(model.matches.count, 2)
+        model.text = "/c" // checks + cancel + changes
+        XCTAssertEqual(model.matches.count, 3)
         XCTAssertFalse(model.shouldCompleteOnReturn)
     }
 

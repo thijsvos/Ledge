@@ -30,8 +30,28 @@ public enum EditPlanApplyError: Error, Equatable, Sendable, LocalizedError {
 
 /// What one applied plan actually did, and how to take it back.
 public struct AppliedPlan: Equatable, Sendable {
+    /// One edit that landed, with the file it landed in.
+    public struct Change: Equatable, Sendable {
+        public let url: URL
+        public let edit: EditPlan.Edit
+
+        public init(url: URL, edit: EditPlan.Edit) {
+            self.url = url
+            self.edit = edit
+        }
+    }
+
     /// Distinct files written, in first-touched order.
     public let filesChanged: [URL]
+    /// Every edit that landed, in the order it was applied.
+    ///
+    /// Retained because an `EditPlan.Edit` already describes its own change
+    /// completely — `create` carries the content, `append` the appended text,
+    /// `replace` both the removed and the added text. So a receipt of what a
+    /// run did needs neither a diff algorithm nor a copy of any file: these
+    /// few strings, which the applier already held, are the whole story. They
+    /// used to be dropped here (see `RunReceipt`).
+    public let changes: [Change]
     /// Pre-images for every file the plan touched (first touch wins), plus the
     /// folders it created. Plain data with no tie to the vault, the plan, or
     /// the run that produced it, so a caller may hold it for as long as
@@ -59,6 +79,7 @@ public enum EditPlanApplier {
         let logger = Logger(subsystem: "app.ledge", category: "runner")
         var undo = RunUndoRecord()
         var changed: [URL] = []
+        var applied: [AppliedPlan.Change] = []
 
         for step in plan.steps {
             do {
@@ -66,6 +87,7 @@ public enum EditPlanApplier {
                 try createMissingDirectories(for: step.url, recordingInto: &undo)
                 undo.record(url: step.url, before: step.before)
                 try write(step)
+                applied.append(AppliedPlan.Change(url: step.url, edit: step.edit))
                 if !changed.contains(step.url) {
                     changed.append(step.url)
                 }
@@ -81,7 +103,7 @@ public enum EditPlanApplier {
         }
 
         logger.info("applied edit plan: \(changed.count) file(s), \(plan.bytesWritten) bytes")
-        return AppliedPlan(filesChanged: changed, undo: undo)
+        return AppliedPlan(filesChanged: changed, changes: applied, undo: undo)
     }
 
     // MARK: - Steps

@@ -60,6 +60,7 @@ struct CaptureView: View {
     /// The controller-owned /resume picker model. Nil (previews) = never in
     /// picker mode.
     var pickerModel: ResumePickerModel?
+    var changesModel: RunChangesModel?
     /// The controller-owned ⌘↩ per-run model chooser. Nil (previews) = never
     /// in chooser mode. Picker mode wins over the chooser; the chooser wins
     /// over the suggestion list.
@@ -91,6 +92,13 @@ struct CaptureView: View {
     private var picker: ResumePickerModel? {
         guard let pickerModel, pickerModel.isActive else { return nil }
         return pickerModel
+    }
+
+    /// The `/changes` pane when it is showing. Same shape as `picker`: nil
+    /// keeps every call site a plain optional-binding.
+    private var changes: RunChangesModel? {
+        guard let changesModel, changesModel.isActive else { return nil }
+        return changesModel
     }
 
     /// Non-nil exactly while the ⌘↩ chooser is up (hidden by picker mode;
@@ -180,6 +188,8 @@ struct CaptureView: View {
             // suggestions.
             if !staticRendering, listRowLimit > 0, let picker {
                 ResumePickerList(model: picker, onSelect: onPickerSelect, rowLimit: listRowLimit)
+            } else if !staticRendering, listRowLimit > 0, let changes {
+                RunChangesList(model: changes, rowLimit: listRowLimit)
             } else if !staticRendering, listRowLimit > 0, let chooser {
                 ModelChoiceList(
                     model: chooser, onSelect: onModelChoiceSelect, rowLimit: listRowLimit

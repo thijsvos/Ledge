@@ -52,6 +52,11 @@ final class AgentRunController: AgentRunSubmitting {
     /// is an "oops, immediately" affordance, and a record that outlived the
     /// app would invite undoing a run the vault has moved well past.
     private var lastUndo: StoredUndo?
+    /// What the last applied run changed, for `/changes`. Shares `lastUndo`'s
+    /// lifetime exactly — set when a plan lands, dropped when `/undo` reverses
+    /// it, when a run is cancelled, or when the vault changes underneath it.
+    /// A receipt for a run you have already undone would be a lie.
+    private var lastReceipt: RunReceipt?
     private var runnerBinaryPath: String?
     private var runnerModel: String?
     private var runnerEffort: String?
@@ -98,6 +103,11 @@ final class AgentRunController: AgentRunSubmitting {
     /// (no time, no outcome glyph) because Ledge stores only the ID, not
     /// when the session ran or how it ended.
     var onEnterResumePicker: ((_ records: [RunRecord], _ seededLastSession: Bool) -> Void)?
+    /// `/changes`: hands the last run's receipt to the window controller, which
+    /// owns the pane model. Synchronous, unlike `/resume` — the receipt is
+    /// already in memory, so there is no async load and no `openGeneration`
+    /// guard to carry. Nil means nothing has changed anything this session.
+    var onEnterChanges: ((_ receipt: RunReceipt?) -> Void)?
     /// Local run history (JSONL in Ledge's own Application Support — §2:
     /// never the vault, never ~/.claude). Written on completion events and
     /// read by /resume, both OFF the main actor; best-effort throughout.
@@ -578,6 +588,7 @@ final class AgentRunController: AgentRunSubmitting {
         // The applied run belonged to the runner being torn down; keeping its
         // pre-images would let /undo write into whatever vault comes next.
         lastUndo = nil
+        lastReceipt = nil
         runnerBinaryPath = nil
         runnerModel = nil
         runnerEffort = nil
@@ -841,6 +852,7 @@ final class AgentRunController: AgentRunSubmitting {
            let vaultPath = runnerVaultPath
         {
             lastUndo = StoredUndo(record: applied.undo, vaultPath: vaultPath)
+            lastReceipt = RunReceipt(applied: applied, explanation: summary.resultText)
         }
         return result
     }
@@ -873,6 +885,12 @@ final class AgentRunController: AgentRunSubmitting {
     /// exists to drop LATE runner-driven peeks that would yank a reopened
     /// field away. Routing this through it swallowed all three messages —
     /// undo worked and said nothing.
+    /// `/changes` — show what the last applied run did. Reads memory only, so
+    /// it cannot fail; an absent receipt is a real answer the pane renders.
+    func presentChanges() {
+        onEnterChanges?(lastReceipt)
+    }
+
     func undoLastRun() {
         // The eligibility rule itself lives in LedgeCore (`RunUndo.decide`), so
         // it has tests — this layer only maps the answer onto a peek. It must
@@ -884,10 +902,12 @@ final class AgentRunController: AgentRunSubmitting {
             userPeek(.info(message: "Nothing to undo"))
         case .recordedForAnotherVault:
             lastUndo = nil
+            lastReceipt = nil
             userPeek(.info(message: "Nothing to undo in this vault"))
         case let .restore(record):
             let restored = RunUndo.restore(record)
             lastUndo = nil
+            lastReceipt = nil
             logger.info("undid last run: \(restored) file(s) restored")
             userPeek(.info(message: "Undone — \(restored) file\(restored == 1 ? "" : "s") restored"))
         }

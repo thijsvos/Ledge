@@ -15,7 +15,7 @@ final class NativeCommandTests: XCTestCase {
         // suggestion list shows exactly this, not alphabetical).
         XCTAssertEqual(
             NativeCommand.allCases.map(\.name),
-            ["help", "settings", "checks", "vault", "resume", "cancel", "undo", "quit"]
+            ["help", "settings", "checks", "vault", "resume", "cancel", "changes", "undo", "quit"]
         )
     }
 
@@ -66,9 +66,14 @@ final class NativeCommandTests: XCTestCase {
     }
 
     func testPrefixFilterIsCaseInsensitiveAndOrderPreserving() {
-        XCTAssertEqual(NativeCommand.matching(prefix: "c"), [.checks, .cancel])
-        XCTAssertEqual(NativeCommand.matching(prefix: "C"), [.checks, .cancel])
+        XCTAssertEqual(NativeCommand.matching(prefix: "c"), [.checks, .cancel, .changes])
+        XCTAssertEqual(NativeCommand.matching(prefix: "C"), [.checks, .cancel, .changes])
         XCTAssertEqual(NativeCommand.matching(prefix: "ca"), [.cancel])
+        // "ch" stopped being unique to /checks when /changes joined the list —
+        // the shadowing this enum's doc comment warns about, made explicit.
+        XCTAssertEqual(NativeCommand.matching(prefix: "ch"), [.checks, .changes])
+        XCTAssertEqual(NativeCommand.matching(prefix: "che"), [.checks])
+        XCTAssertEqual(NativeCommand.matching(prefix: "cha"), [.changes])
         XCTAssertEqual(NativeCommand.matching(prefix: "quit"), [.quit])
         XCTAssertEqual(NativeCommand.matching(prefix: "z"), [])
         XCTAssertEqual(NativeCommand.matching(prefix: "help "), [])

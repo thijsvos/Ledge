@@ -94,6 +94,10 @@ struct IslandView: View {
     /// default, and what --render-preview gets — means picker mode never
     /// renders; previews are unchanged.
     var pickerModel: ResumePickerModel?
+    /// The `/changes` receipt pane (owned by the window controller). Nil — the
+    /// default, and what --render-preview gets — means the pane never renders;
+    /// previews are unchanged.
+    var changesModel: RunChangesModel?
     /// The ⌘↩ per-run model chooser (owned by the window controller). Nil —
     /// the default, and what --render-preview gets — means chooser mode
     /// never renders; previews are unchanged.
@@ -122,6 +126,7 @@ struct IslandView: View {
         reduceMotion: Bool = false,
         suggestionModel: SlashSuggestionModel? = nil,
         pickerModel: ResumePickerModel? = nil,
+        changesModel: RunChangesModel? = nil,
         modelChoiceModel: ModelChoiceModel? = nil,
         openLayoutModel: OpenLayoutModel? = nil,
         runStatusModel: RunStatusModel? = nil,
@@ -141,6 +146,7 @@ struct IslandView: View {
         self.reduceMotion = reduceMotion
         self.suggestionModel = suggestionModel
         self.pickerModel = pickerModel
+        self.changesModel = changesModel
         self.modelChoiceModel = modelChoiceModel
         self.openLayoutModel = openLayoutModel
         self.runStatusModel = runStatusModel
@@ -185,7 +191,8 @@ struct IslandView: View {
     /// SAME RunStatusModel instance.
     static func shapeSize(
         for state: IslandState, layout: IslandLayout, openSuggestionRows: Int = 0,
-        openPickerRows: Int = 0, openChooserRows: Int = 0, openFieldExtraHeight: CGFloat = 0,
+        openPickerRows: Int = 0, openChangesRows: Int = 0, openChooserRows: Int = 0,
+        openFieldExtraHeight: CGFloat = 0,
         runningHoverStatus: Bool = false
     ) -> CGSize {
         switch state {
@@ -212,6 +219,7 @@ struct IslandView: View {
                     layout: layout,
                     openSuggestionRows: openSuggestionRows,
                     openPickerRows: openPickerRows,
+                    openChangesRows: openChangesRows,
                     openChooserRows: openChooserRows,
                     openFieldExtraHeight: openFieldExtraHeight
                 ).height
@@ -276,7 +284,7 @@ struct IslandView: View {
     /// it while active.
     static func openPlan(
         layout: IslandLayout, openSuggestionRows: Int, openPickerRows: Int,
-        openChooserRows: Int, openFieldExtraHeight: CGFloat
+        openChangesRows: Int, openChooserRows: Int, openFieldExtraHeight: CGFloat
     ) -> (height: CGFloat, rowBudget: Int) {
         let plan = if openPickerRows > 0 {
             OpenIslandLayout.compute(
@@ -284,6 +292,14 @@ struct IslandView: View {
                 requestedRows: min(openPickerRows, ResumePickerModel.maxVisibleRows),
                 rowHeight: ResumePickerList.rowHeight,
                 baseHeight: 90,
+                maxHeight: layout.windowSize.height
+            )
+        } else if openChangesRows > 0 {
+            OpenIslandLayout.compute(
+                fieldExtraHeight: openFieldExtraHeight,
+                requestedRows: min(openChangesRows, RunChangesModel.maxVisibleRows),
+                rowHeight: RunChangesList.rowHeight,
+                baseHeight: 120,
                 maxHeight: layout.windowSize.height
             )
         } else if openChooserRows > 0 {
@@ -322,6 +338,14 @@ struct IslandView: View {
         return max(1, pickerModel.visibleRowCount)
     }
 
+    /// Reading `visibleRowCount` in body makes SwiftUI re-render (and the shape
+    /// re-size) when the receipt loads. Zero when the pane is closed, which is
+    /// what keeps the open shape at its normal height.
+    private var openChangesRows: Int {
+        guard let changesModel, changesModel.isActive else { return 0 }
+        return changesModel.visibleRowCount
+    }
+
     /// > 0 exactly while the ⌘↩ model chooser is active (its 3 fixed rows).
     /// Reading `visibleRowCount` in body makes SwiftUI re-render (and the
     /// shape re-size) when the chooser activates or deactivates.
@@ -356,6 +380,7 @@ struct IslandView: View {
             layout: layout,
             openSuggestionRows: openSuggestionRows,
             openPickerRows: openPickerRows,
+            openChangesRows: openChangesRows,
             openChooserRows: openChooserRows,
             openFieldExtraHeight: openFieldExtra,
             runningHoverStatus: runningHoverStatus
@@ -425,6 +450,7 @@ struct IslandView: View {
                 restoreInput: captureRestoreInput,
                 suggestionModel: suggestionModel,
                 pickerModel: pickerModel,
+                changesModel: changesModel,
                 modelChoiceModel: modelChoiceModel,
                 onPickerSelect: onPickerSelect,
                 onModelChoiceSelect: onModelChoiceSelect,
@@ -436,6 +462,7 @@ struct IslandView: View {
                     layout: layout,
                     openSuggestionRows: openSuggestionRows,
                     openPickerRows: openPickerRows,
+                    openChangesRows: openChangesRows,
                     openChooserRows: openChooserRows,
                     openFieldExtraHeight: openFieldExtra
                 ).rowBudget
